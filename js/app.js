@@ -1,6 +1,6 @@
 'use strict';
 /*
- * 팁 계산기 UI (뼈대 v1)
+ * 팁 계산기 UI (뼈대 v2)
  * 기본 흐름: 팁 총액 입력 → 일한 사람 칩 선택 → 결과 확인 (3단계)
  * 시간·구간 입력은 접힌 고급 옵션 안에 있다.
  * 상태는 localStorage에 저장 (명단 + 마지막 선택 + 입력값). 백엔드 없음.
@@ -8,6 +8,21 @@
  */
 (function () {
   var LS_KEY = 'tipcalc-v1';
+  // 기본 명단 (버전 관리). 새 직원이 기본 명단에 추가되면 버전을 올린다.
+  // 로드 시 저장된 명단에 없는 기본 인원은 병합으로 추가된다 (mergeDefaultRoster 참고).
+  var DEFAULT_ROSTER_VERSION = 2;
+  // aliases: 한 사람의 다른 표기(한글/영어)를 묶는 별칭 목록.
+  // 확정 쌍: Young=영, Micky=미키. 나머지는 확정 전이라 비워 둔다 (임의로 만들지 않음).
+  // 용도: 나중에 정산지 사진 판독의 손글씨 이름을 명단과 매칭할 때 사용.
+  var DEFAULT_ROSTER = [
+    { id: 'p-jiseon', name: '지선', role: 'server', aliases: [] },
+    { id: 'p-sky', name: 'Sky', role: 'server', aliases: [] },
+    { id: 'p-mew', name: 'Mew', role: 'server', aliases: [] },
+    { id: 'p-young', name: 'Young', role: 'kitchen', aliases: ['영'] },
+    { id: 'p-youngshin', name: 'Young shin', role: 'kitchen', aliases: [] },
+    { id: 'p-nara', name: 'Nara', role: 'kitchen', aliases: [] },
+    { id: 'p-micky', name: 'Micky', role: 'kitchen', aliases: ['미키'] },
+  ];
   var SHIFT_DEFS = [
     { key: 'am', title: '오전 시프트 (점심)', defStart: '11:00', defEnd: '15:00' },
     { key: 'pm', title: '오후 시프트 (저녁)', defStart: '16:00', defEnd: '21:00' },
@@ -31,15 +46,45 @@
   function seedState() {
     return {
       date: todayStr(),
-      roster: [
-        { id: 'p-jiseon', name: '지선', role: 'server' },
-        { id: 'p-sky', name: 'Sky', role: 'server' },
-      ],
+      rosterVersion: DEFAULT_ROSTER_VERSION,
+      roster: DEFAULT_ROSTER.map(function (p) {
+        return { id: p.id, name: p.name, role: p.role, aliases: (p.aliases || []).slice() };
+      }),
       shifts: {
         am: freshShift('11:00', '15:00', ['p-jiseon', 'p-sky']),
         pm: freshShift('16:00', '21:00', ['p-jiseon', 'p-sky']),
       },
     };
+  }
+  // 저장된 인원이 기본 인원과 같은 사람인지 판정 (id / 이름 / 별칭 교차 매칭).
+  function samePerson(p, def) {
+    if (p.id === def.id || p.name === def.name) return true;
+    var pAliases = p.aliases || [];
+    var dAliases = def.aliases || [];
+    if (dAliases.indexOf(p.name) >= 0) return true;
+    if (pAliases.indexOf(def.name) >= 0) return true;
+    return dAliases.some(function (a) { return pAliases.indexOf(a) >= 0; });
+  }
+  // 기본 명단 병합: 저장된 명단에 없는 기본 인원을 뒤에 추가한다.
+  // - 사용자가 직접 추가한 사람은 그대로 유지된다.
+  // - 이미 있는 기본 인원은 기본 별칭이 빠져 있으면 채워 넣는다 (합집합).
+  // - 사용자가 지운 기본 인원도 다시 추가된다 (뼈대 단계의 단순 동작 — SPEC 명시).
+  // - 병합된 인원은 어떤 시프트에도 자동 선택되지 않는다 (선택은 shifts를 건드리지 않음).
+  function mergeDefaultRoster(roster) {
+    var merged = roster.slice();
+    DEFAULT_ROSTER.forEach(function (def) {
+      var found = null;
+      merged.forEach(function (p) { if (!found && samePerson(p, def)) found = p; });
+      if (found) {
+        if (!Array.isArray(found.aliases)) found.aliases = [];
+        (def.aliases || []).forEach(function (a) {
+          if (found.aliases.indexOf(a) < 0) found.aliases.push(a);
+        });
+      } else {
+        merged.push({ id: def.id, name: def.name, role: def.role, aliases: (def.aliases || []).slice() });
+      }
+    });
+    return merged;
   }
   function loadState() {
     try {
@@ -47,6 +92,8 @@
       if (!raw) return seedState();
       var s = JSON.parse(raw);
       if (!s || !Array.isArray(s.roster) || !s.shifts || !s.shifts.am || !s.shifts.pm) return seedState();
+      s.roster = mergeDefaultRoster(s.roster);
+      s.rosterVersion = DEFAULT_ROSTER_VERSION;
       return s;
     } catch (e) {
       return seedState();
@@ -404,12 +451,15 @@
     var nameInput = $('#newName');
     var name = nameInput.value.trim();
     if (!name) return;
-    var dup = state.roster.some(function (p) { return p.name === name; });
-    if (dup) {
-      window.alert('같은 이름이 이미 있어요. 다른 이름으로 추가해 주세요.');
+    var dupPerson = null;
+    state.roster.forEach(function (p) {
+      if (!dupPerson && (p.name === name || (p.aliases || []).indexOf(name) >= 0)) dupPerson = p;
+    });
+    if (dupPerson) {
+      window.alert('이미 명단에 있는 사람이에요: ' + dupPerson.name);
       return;
     }
-    state.roster.push({ id: uid(), name: name, role: $('#newRole').value });
+    state.roster.push({ id: uid(), name: name, role: $('#newRole').value, aliases: [] });
     nameInput.value = '';
     save();
     renderAll();
