@@ -1,9 +1,12 @@
 'use strict';
 /*
- * 팁 계산기 UI (뼈대 v2)
+ * 팁톡(TipTalk) UI (v3)
  * 기본 흐름: 팁 총액 입력 → 일한 사람 칩 선택 → 결과 확인 (3단계)
  * 시간·구간 입력은 접힌 고급 옵션 안에 있다.
- * 상태는 localStorage에 저장 (명단 + 마지막 선택 + 입력값). 백엔드 없음.
+ * v3: 시프트 카드의 "사진으로 채우기" — 정산지 사진을 올리면 판독 데몬이 읽어서
+ *     팁 총액을 자동 입력하고, 손글씨 이름은 명단과 매칭해 "제안" 칩으로만 표시한다
+ *     (확정은 사용자가 탭해야 한다). 사진 통신은 js/photo.js (TipPhoto)가 담당.
+ * 상태는 localStorage에 저장 (명단 + 마지막 선택 + 입력값).
  * 계산은 전부 js/calc.js 의 순수 함수에 위임한다.
  */
 (function () {
@@ -41,7 +44,11 @@
   function freshShift(start, end, selectedIds) {
     var sel = {};
     (selectedIds || []).forEach(function (id) { sel[id] = { start: '', end: '' }; });
-    return { total: '', start: start, end: end, selected: sel, segAmounts: {}, advancedOpen: false };
+    return {
+      total: '', start: start, end: end, selected: sel, segAmounts: {}, advancedOpen: false,
+      suggested: {},   // 사진 판독이 제안한 사람 {personId: 읽은 이름} — 확정은 사용자가 탭
+      photoInfo: null, // 마지막 사진 판독 참고 정보 {purchase, tickets, time, fromOther, unmatched}
+    };
   }
   function seedState() {
     return {
@@ -94,6 +101,11 @@
       if (!s || !Array.isArray(s.roster) || !s.shifts || !s.shifts.am || !s.shifts.pm) return seedState();
       s.roster = mergeDefaultRoster(s.roster);
       s.rosterVersion = DEFAULT_ROSTER_VERSION;
+      // v3 필드 보정 (v2 저장본에는 없음)
+      ['am', 'pm'].forEach(function (k) {
+        if (!s.shifts[k].suggested) s.shifts[k].suggested = {};
+        if (s.shifts[k].photoInfo === undefined) s.shifts[k].photoInfo = null;
+      });
       return s;
     } catch (e) {
       return seedState();
@@ -162,6 +174,79 @@
     return { result: result, segments: result.segments };
   }
 
+  // ---------- 사진 판독 (v3) ----------
+  // 진행 상태는 저장하지 않는 화면 전용 상태 (렌더를 다시 해도 유지되게 렌더 밖에서 관리).
+  var photoUi = { am: { busy: false, msg: '' }, pm: { busy: false, msg: '' } };
+
+  function setPhotoStatus(key, msg) {
+    photoUi[key].msg = msg;
+    var section = document.getElementById('shift-' + key);
+    var box = section ? section.querySelector('[data-photo-status]') : null;
+    if (box) box.textContent = msg;
+    var btn = section ? section.querySelector('[data-photo-btn]') : null;
+    if (btn) btn.disabled = photoUi[key].busy;
+  }
+
+  // 판독 완료 행을 시프트에 반영: 팁 총액은 정산 시각으로 판정한 시프트에 넣고,
+  // 손글씨 이름은 선택하지 않고 "제안"으로만 표시한다 (확정은 사용자 탭).
+  function applyPhotoResult(fromKey, row) {
+    var targetKey = TipPhoto.decideShift(row.settled_time) || fromKey;
+    var shift = state.shifts[targetKey];
+    if (row.tip_amount != null) shift.total = String(row.tip_amount);
+    var readNames = Array.isArray(row.names) ? row.names : [];
+    var m = TipPhoto.matchNames(readNames, state.roster);
+    if (!shift.suggested) shift.suggested = {};
+    m.matched.forEach(function (x) {
+      if (!shift.selected[x.personId]) shift.suggested[x.personId] = x.readName;
+    });
+    var rawTime = (row.raw && row.raw.time) ||
+      (row.settled_time ? String(row.settled_time).slice(11) : '');
+    shift.photoInfo = {
+      purchase: row.purchase_amount != null ? row.purchase_amount : null,
+      tickets: row.ticket_count != null ? row.ticket_count : null,
+      time: rawTime,
+      fromOther: targetKey !== fromKey ? fromKey : null,
+      unmatched: m.unmatched,
+    };
+    save();
+    photoUi[targetKey].busy = false;
+    setPhotoStatus(targetKey, '✓ 판독 완료 — 금액과 사람이 맞는지 확인해 주세요.');
+    renderShift(targetKey);
+    if (targetKey !== fromKey) {
+      photoUi[fromKey].busy = false;
+      setPhotoStatus(fromKey, '사진은 ' + (targetKey === 'am' ? '오전' : '오후') +
+        ' 시프트에 넣었어요.');
+      renderShift(fromKey);
+      var target = document.getElementById('shift-' + targetKey);
+      if (target && target.scrollIntoView) {
+        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }
+    renderResults();
+  }
+
+  function handlePhoto(key, file) {
+    if (!file || photoUi[key].busy) return;
+    photoUi[key].busy = true;
+    setPhotoStatus(key, '사진을 올리고 있어요…');
+    TipPhoto.uploadAndCreate(file).then(function (id) {
+      setPhotoStatus(key, '판독 중이에요…');
+      return TipPhoto.pollResult(id, function (sec) {
+        setPhotoStatus(key, '판독 중이에요… (' + sec + '초)');
+      });
+    }).then(function (row) {
+      if (row.status === 'error') {
+        photoUi[key].busy = false;
+        setPhotoStatus(key, '⚠ ' + (row.error || '판독에 실패했어요. 사진을 다시 찍어주세요.'));
+        return;
+      }
+      applyPhotoResult(key, row);
+    }).catch(function (e) {
+      photoUi[key].busy = false;
+      setPhotoStatus(key, '⚠ ' + (e && e.message ? e.message : '사진을 처리하지 못했어요.'));
+    });
+  }
+
   // ---------- 명단 렌더 ----------
   function renderRoster() {
     var box = $('#rosterList');
@@ -192,8 +277,11 @@
 
     var chipsHtml = state.roster.map(function (p) {
       var on = !!shift.selected[p.id];
-      return '<button type="button" class="chip' + (on ? ' on' : '') + '" data-chip="' + p.id + '">' +
+      var suggested = !on && !!(shift.suggested && shift.suggested[p.id]);
+      return '<button type="button" class="chip' + (on ? ' on' : '') +
+        (suggested ? ' suggested' : '') + '" data-chip="' + p.id + '">' +
         esc(p.name) +
+        (suggested ? '<span class="suggest-badge">사진 판독</span>' : '') +
         '<span class="role-badge' + (p.role === 'kitchen' ? ' kitchen' : '') + '">' +
           (p.role === 'kitchen' ? '주방' : '서버') + '</span>' +
       '</button>';
@@ -270,6 +358,27 @@
       advHtml += '</div>';
     }
 
+    var photoInfoHtml = '';
+    if (shift.photoInfo) {
+      var pi = shift.photoInfo;
+      var bits = [];
+      if (pi.purchase != null) bits.push('매출 ' + fmt(TipCalc.toCents(pi.purchase)));
+      if (pi.tickets != null) bits.push('티켓 ' + pi.tickets + '장');
+      if (pi.time) bits.push('정산 ' + esc(pi.time));
+      photoInfoHtml = '<div class="photo-info">';
+      if (bits.length > 0) photoInfoHtml += '<div>📷 사진 판독 — ' + bits.join(' · ') + '</div>';
+      if (pi.fromOther) {
+        photoInfoHtml += '<div class="photo-note">↪ ' +
+          (pi.fromOther === 'am' ? '오전' : '오후') +
+          ' 카드에서 올린 사진인데, 정산 시각으로 이 시프트에 넣었어요.</div>';
+      }
+      if (pi.unmatched && pi.unmatched.length > 0) {
+        photoInfoHtml += '<div class="photo-note">읽은 이름 중 명단에 없는 이름: ' +
+          esc(pi.unmatched.join(', ')) + ' — 맞으면 위에서 직접 눌러주세요.</div>';
+      }
+      photoInfoHtml += '</div>';
+    }
+
     var needSegInput = result.incomplete && segs.length > 1;
     section.innerHTML =
       '<div class="shift-head"><h2>' + def.title + '</h2>' +
@@ -278,6 +387,13 @@
       '<div class="money-wrap"><span class="dollar">$</span>' +
       '<input type="number" class="money-input" id="total-' + key + '" inputmode="decimal" min="0" step="0.01" ' +
       'placeholder="0.00" data-total-input value="' + esc(String(shift.total)) + '"></div></div>' +
+      '<div class="photo-row">' +
+      '<button type="button" class="btn photo-btn" data-photo-btn' +
+        (photoUi[key].busy ? ' disabled' : '') + '>📷 사진으로 채우기</button>' +
+      '<input type="file" accept="image/*" class="photo-input" data-photo-input hidden>' +
+      '</div>' +
+      '<div class="photo-status" data-photo-status>' + esc(photoUi[key].msg) + '</div>' +
+      photoInfoHtml +
       '<p class="chips-label">일한 사람 (눌러서 선택)</p>' +
       '<div class="chips">' + chipsHtml + '</div>' +
       kitchenHtml +
@@ -325,11 +441,24 @@
         var id = btn.getAttribute('data-chip');
         if (shift.selected[id]) delete shift.selected[id];
         else shift.selected[id] = { start: '', end: '' };
+        // 사진 판독 제안은 탭하는 순간 확정/해제되므로 제안 표시를 지운다.
+        if (shift.suggested) delete shift.suggested[id];
         save();
         renderShift(key);
         renderResults();
       });
     });
+
+    var photoBtn = $('[data-photo-btn]', section);
+    var photoInput = $('[data-photo-input]', section);
+    if (photoBtn && photoInput) {
+      photoBtn.addEventListener('click', function () { photoInput.click(); });
+      photoInput.addEventListener('change', function () {
+        var file = photoInput.files && photoInput.files[0];
+        photoInput.value = ''; // 같은 파일을 다시 골라도 change가 발생하게
+        handlePhoto(key, file);
+      });
+    }
 
     var advBtn = $('[data-advanced-toggle]', section);
     advBtn.addEventListener('click', function () {
@@ -439,7 +568,10 @@
       var target = personById(delBtn.getAttribute('data-delete-person'));
       if (target && window.confirm(target.name + ' 님을 명단에서 지울까요?')) {
         state.roster = state.roster.filter(function (x) { return x.id !== target.id; });
-        SHIFT_DEFS.forEach(function (d) { delete state.shifts[d.key].selected[target.id]; });
+        SHIFT_DEFS.forEach(function (d) {
+          delete state.shifts[d.key].selected[target.id];
+          if (state.shifts[d.key].suggested) delete state.shifts[d.key].suggested[target.id];
+        });
         save();
         renderAll();
       }
@@ -478,6 +610,8 @@
       var sh = state.shifts[d.key];
       sh.total = '';
       sh.segAmounts = {};
+      sh.suggested = {};
+      sh.photoInfo = null;
       Object.keys(sh.selected).forEach(function (id) {
         sh.selected[id] = { start: '', end: '' };
       });
