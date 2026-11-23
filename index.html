@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>팁톡 TipTalk</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💰</text></svg>">
-<link rel="stylesheet" href="css/style.css?v=10">
+<link rel="stylesheet" href="css/style.css?v=11">
 </head>
 <body>
 <header class="topbar">
@@ -14,6 +14,13 @@
     <label for="dateInput">날짜</label>
     <input type="date" id="dateInput">
     <button id="resetDayBtn" class="btn btn-ghost" type="button">오늘 입력 지우기</button>
+  </div>
+  <div id="dateMoveConfirm" class="date-move-confirm" hidden>
+    <p id="dateMoveMsg"></p>
+    <div class="date-move-actions">
+      <button id="dateMoveYesBtn" class="btn btn-primary" type="button">옮기고 덮어쓰기</button>
+      <button id="dateMoveNoBtn" class="btn" type="button">그대로 두기</button>
+    </div>
   </div>
   <p class="top-hint">정산지 사진을 찍어 올리거나, 팁 총액을 넣고 일한 사람을 누르면 끝이에요.</p>
 </header>
@@ -68,8 +75,8 @@
   </div>
 </div>
 
-<script src="js/calc.js?v=10"></script>
-<script src="js/photo.js?v=10"></script>
-<script src="js/app.js?v=10"></script>
+<script src="js/calc.js?v=11"></script>
+<script src="js/photo.js?v=11"></script>
+<script src="js/app.js?v=11"></script>
 </body>
 </html>

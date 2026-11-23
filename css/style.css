@@ -61,6 +61,24 @@ body {
 .app-en { font-size: 17px; color: var(--muted); font-weight: 600; }
 .date-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .date-row label { font-weight: 600; }
+/* 날짜 이동 덮어쓰기 확인 바 (v11) */
+.date-move-confirm {
+  margin-top: 10px; padding: 12px; border-radius: 12px;
+  background: var(--warn-bg); border: 1.5px solid var(--warn);
+}
+.date-move-confirm[hidden] { display: none; }
+.date-move-confirm p { margin: 0 0 10px; font-weight: 600; font-size: 15px; }
+.date-move-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.date-move-actions .btn { flex: 1; min-width: 0; white-space: nowrap; padding: 8px 10px; }
+/* 판독 실패 시 날짜 칸 강조 (v11) */
+@keyframes dateFlashPulse {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; }
+  50% { box-shadow: 0 0 0 4px var(--accent); }
+}
+input[type="date"].date-flash {
+  border-color: var(--accent);
+  animation: dateFlashPulse 0.7s ease-in-out 3;
+}
 .top-hint { color: var(--muted); margin: 10px 0 4px; font-size: 15px; }
 main {
   max-width: 640px;

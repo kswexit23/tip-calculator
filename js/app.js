@@ -18,6 +18,13 @@
  *     참고 정보)만 되돌리고 손으로 고친 값은 그대로 둔다. 판독 중이면 폴링을
  *     멈추고 늦은 결과는 버리며, 백엔드 행 취소·파일 삭제는 best-effort로 건다
  *     (정책 SQL은 add-v9-photo-delete.sql, 없어도 UI는 동작).
+ * v11: 날짜 정정 — 입력(팁 금액)이 있는 상태에서 상단 날짜 칸을 바꾸면 입력이
+ *     지워지지 않고 새 날짜로 따라가며, 옛 날짜에 저장된 이 입력의 기록도
+ *     새 날짜로 옮겨진다. 새 날짜에 다른 기록이 있으면 인라인 확인 바에서
+ *     확인받기 전까지 날짜를 원래대로 되돌려 둔다. 입력이 없으면 기존
+ *     둘러보기 동작(입력 비움, 기록 무변경) 그대로다. 달력 날짜 클릭은
+ *     둘러보기 용도라 기존 동작을 유지한다. 사진 참고 정보에 정산지 날짜를
+ *     명시하고, 판독 실패 시에는 날짜 칸을 강조하며 직접 입력을 안내한다.
  * v3: 시프트 카드의 "사진으로 채우기" — 정산지 사진을 올리면 판독 데몬이 읽어서
  *     팁 총액을 자동 입력하고, 손글씨 이름은 명단과 매칭해 "제안" 칩으로만 표시한다
  *     (확정은 사용자가 탭해야 한다). 사진 통신은 js/photo.js (TipPhoto)가 담당.
@@ -204,6 +211,22 @@
   // 보러 온 경우에는 false라서 기존 기록을 지우거나 덮지 않는다.
   var inputsDirty = false;
 
+  // 현재 입력이 만들어낼 날짜 기록을 syncHistory와 같은 규칙으로 만든다.
+  // 저장될 기록이 없는 상태(총액 0·합계 검증 실패·받은 사람이 없음)면 null.
+  // v11 날짜 이동의 덮어쓰기 판정도 이 함수를 써서 "실제로 저장될 기록"과
+  // 어긋나지 않게 한다.
+  function buildDayEntry(day) {
+    if (day.totalCents === 0 || !day.balanced) return null;
+    var entry = {};
+    Object.keys(day.perPerson).forEach(function (id) {
+      var p = personById(id);
+      // 0원인 사람은 기록하지 않는다 (총액 0인 시프트에 선택만 돼 있어도
+      // perPerson에 0으로 들어오기 때문 — 받은 팁이 있는 사람만 남긴다).
+      if (p && day.perPerson[id] > 0) entry[p.name] = Math.round(day.perPerson[id]) / 100;
+    });
+    return Object.keys(entry).length > 0 ? entry : null;
+  }
+
   // 계산 결과를 현재 선택 날짜의 기록으로 반영한다.
   // - 총액 0 → 그 날짜 기록 삭제 (사용자가 입력을 비운 경우)
   // - 합계 검증 OK → 인당 합계로 저장 (이름 기준, 주방 포함 전 인원)
@@ -217,14 +240,8 @@
     if (day.totalCents === 0) {
       if (hist[date]) { delete hist[date]; changed = true; }
     } else if (day.balanced) {
-      var entry = {};
-      Object.keys(day.perPerson).forEach(function (id) {
-        var p = personById(id);
-        // 0원인 사람은 기록하지 않는다 (총액 0인 시프트에 선택만 돼 있어도
-        // perPerson에 0으로 들어오기 때문 — 받은 팁이 있는 사람만 남긴다).
-        if (p && day.perPerson[id] > 0) entry[p.name] = Math.round(day.perPerson[id]) / 100;
-      });
-      if (Object.keys(entry).length === 0) {
+      var entry = buildDayEntry(day);
+      if (!entry) {
         if (hist[date]) { delete hist[date]; changed = true; }
       } else if (JSON.stringify(hist[date]) !== JSON.stringify(entry)) {
         hist[date] = entry;
@@ -251,6 +268,99 @@
       sh.selected = {};
       sh.done = false;
     });
+  }
+
+  // ---------- 날짜 이동 (v11) ----------
+  // 사진 판독이 정산지 날짜를 잘못 읽으면 기록이 엉뚱한 날짜로 저장되는데,
+  // 예전에는 날짜를 바꾸면 입력이 전부 지워져 정정할 방법이 없었다.
+  // 이제 입력(팁 금액)이 있는 상태에서 상단 날짜 칸을 바꾸면 입력이 새
+  // 날짜로 따라가고, 옛 날짜에 저장된 이 입력의 기록도 함께 옮겨진다.
+  // 덮어쓰기 확인 대기 중인 이동 { newDate } — 확인 전까지 날짜는 안 바뀐다.
+  var pendingDateMove = null;
+
+  function currentDayResult() {
+    return TipCalc.computeDay([
+      computeForShift(state.shifts.am).result,
+      computeForShift(state.shifts.pm).result,
+    ]);
+  }
+
+  // "입력이 있는 상태"인지: 사용자가 이번 날짜에서 실제로 건드렸고(inputsDirty)
+  // 팁 금액이 들어 있어야 한다. 금액 없이 사람만 고른 상태는 기록이 없어서
+  // 기존 둘러보기 동작으로 충분하다. 앱을 다시 열면 inputsDirty가 false라
+  // 지난 세션의 입력이 멋대로 따라다니지도 않는다.
+  function canMoveInputs() {
+    if (!inputsDirty) return false;
+    return SHIFT_DEFS.some(function (d) {
+      return TipCalc.toCents(state.shifts[d.key].total) > 0;
+    });
+  }
+
+  function hideDateMoveConfirm() {
+    pendingDateMove = null;
+    var bar = $('#dateMoveConfirm');
+    if (bar) bar.hidden = true;
+  }
+
+  function showDateMoveConfirm(newDate) {
+    pendingDateMove = { newDate: newDate };
+    var bar = $('#dateMoveConfirm');
+    var msg = $('#dateMoveMsg');
+    var d = parseDateStr(newDate);
+    if (msg && d) {
+      msg.textContent = dayLabel(d) + ' (' + DOW_LABELS[d.getDay()] +
+        '요일)에 이미 기록이 있어요. 지금 입력을 그 날짜로 옮기면, ' +
+        '그날 기록은 지금 입력으로 바뀌어요.';
+    }
+    if (bar) bar.hidden = false;
+  }
+
+  // 날짜 이동 적용: 옛 날짜에 저장된 이 입력의 기록은 지우고, 입력은
+  // 지우지 않은 채 날짜만 바꾼다 — renderResults → syncHistory가 같은
+  // 입력을 새 날짜 기록으로 다시 저장한다 (inputsDirty는 유지).
+  function applyDateMove(newDate) {
+    var hist = loadHistory();
+    if (hist[state.date]) {
+      delete hist[state.date];
+      saveHistory(hist);
+    }
+    state.date = newDate;
+    var di = $('#dateInput');
+    if (di) di.value = newDate;
+    calYearMonth = null;
+    hideDateMoveConfirm();
+    save();
+    renderAll();
+  }
+
+  // 입력이 없을 때의 날짜 이동 (기존 둘러보기 동작): 입력은 비워지고,
+  // inputsDirty를 false로 둬서 기존 기록이 지워지거나 덮어씌워지지 않는다.
+  function navigateDate(newDate) {
+    state.date = newDate;
+    clearShiftInputs();
+    inputsDirty = false;
+    calYearMonth = null;
+    hideDateMoveConfirm();
+    save();
+    renderAll();
+  }
+
+  // 상단 날짜 칸 변경의 진입점.
+  // - 입력이 없으면 둘러보기 이동.
+  // - 입력이 있으면 이동. 단, 새 날짜에 다른 기록이 이미 있으면 덮기 전에
+  //   인라인 확인 바를 띄우고, 확인 전까지 날짜 칸을 원래 날짜로 되돌려 둔다
+  //   (확인하지 않으면 아무것도 바뀌지 않는다).
+  function attemptDateChange(newDate) {
+    if (!canMoveInputs()) { navigateDate(newDate); return; }
+    var entry = buildDayEntry(currentDayResult());
+    var existing = loadHistory()[newDate];
+    if (entry && existing && JSON.stringify(existing) !== JSON.stringify(entry)) {
+      var di = $('#dateInput');
+      if (di) di.value = state.date;
+      showDateMoveConfirm(newDate);
+      return;
+    }
+    applyDateMove(newDate);
   }
 
   // ---------- 도우미 ----------
@@ -316,6 +426,23 @@
     if (btn) btn.disabled = photoUi[key].busy;
   }
 
+  // 판독 실패 안내 (v11): 사진이 잘 안 찍혀 인식이 안 돼도, 날짜를 골라
+  // 직접 입력하면 그 날짜로 저장된다 — 그 길로 자연스럽게 유도한다.
+  function photoFailMessage(reason) {
+    var msg = '⚠ ' + (reason || '판독에 실패했어요.');
+    if (msg.indexOf('직접 입력') < 0) {
+      msg += ' 인식이 안 되면 날짜를 골라서 직접 입력해도 돼요.';
+    }
+    return msg;
+  }
+  function guideToDateInput() {
+    var di = $('#dateInput');
+    if (!di) return;
+    if (di.scrollIntoView) di.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    di.classList.add('date-flash');
+    setTimeout(function () { di.classList.remove('date-flash'); }, 2100);
+  }
+
   // 판독 완료 행을 시프트에 반영: 팁 총액은 정산 시각으로 판정한 시프트에 넣고,
   // 손글씨 이름은 선택하지 않고 "제안"으로만 표시한다 (확정은 사용자 탭).
   // v4: 정산지 날짜가 현재 선택 날짜와 다르면 날짜를 그쪽으로 바꾸고 입력을
@@ -333,6 +460,7 @@
       if (di) di.value = photoDate;
       clearShiftInputs();
       calYearMonth = null;
+      hideDateMoveConfirm();
     }
     inputsDirty = true;
     var targetKey = TipPhoto.decideShift(row.settled_time) || fromKey;
@@ -360,6 +488,7 @@
       purchase: row.purchase_amount != null ? row.purchase_amount : null,
       tickets: row.ticket_count != null ? row.ticket_count : null,
       time: rawTime,
+      date: photoDate, // v11: 정산지 날짜를 눈에 보이게 표시 (정정 안내 포함)
       fromOther: targetKey !== fromKey ? fromKey : null,
       unmatched: m.unmatched,
     };
@@ -433,8 +562,9 @@
         ui.active = false;
         ui.pendingId = null;
         ui.pendingPath = null;
-        setPhotoStatus(key, '⚠ ' + (row.error || '판독에 실패했어요. 사진을 다시 찍어주세요.'));
+        setPhotoStatus(key, photoFailMessage(row.error));
         renderShift(key);
+        guideToDateInput();
         return;
       }
       applyPhotoResult(key, row, res.meta);
@@ -449,8 +579,9 @@
         renderShift(key);
         return;
       }
-      setPhotoStatus(key, '⚠ ' + (e && e.message ? e.message : '사진을 처리하지 못했어요.'));
+      setPhotoStatus(key, photoFailMessage(e && e.message ? e.message : '사진을 처리하지 못했어요.'));
       renderShift(key);
+      guideToDateInput();
     });
   }
 
@@ -675,6 +806,15 @@
       if (pi.time) bits.push('정산 ' + esc(pi.time));
       photoInfoHtml = '<div class="photo-info">';
       if (bits.length > 0) photoInfoHtml += '<div>📷 사진 판독 — ' + bits.join(' · ') + '</div>';
+      // v11: 정산지 날짜를 명시한다. 날짜를 잘못 읽으면 기록이 엉뚱한 날짜로
+      // 저장되므로, 사용자가 바로 알아채고 날짜 칸에서 정정할 수 있게.
+      var photoDateObj = pi.date ? parseDateStr(pi.date) : null;
+      if (photoDateObj) {
+        photoInfoHtml += '<div>🗓 정산지 날짜: ' + dayLabel(photoDateObj) +
+          ' (' + DOW_LABELS[photoDateObj.getDay()] + ')</div>';
+        photoInfoHtml += '<div class="photo-note">날짜가 실제와 다르면 위 날짜 칸에서 ' +
+          '바꾸세요 — 입력이 같이 옮겨가요.</div>';
+      }
       if (pi.fromOther) {
         photoInfoHtml += '<div class="photo-note">↪ ' +
           (pi.fromOther === 'am' ? '오전' : '오후') +
@@ -989,17 +1129,21 @@
     }
   }
 
-  // 달력에서 날짜를 고르면 위쪽 날짜 선택과 같은 동작을 한다:
-  // 날짜가 바뀌면 입력은 비워지고(안전장치), 그날 기록이 아래에 표시된다.
+  // 달력에서 날짜를 고르면: 날짜가 바뀌면 입력은 비워지고(안전장치),
+  // 그날 기록이 아래에 표시된다. 상단 날짜 칸의 "날짜 이동"(v11)과 달리
+  // 달력은 둘러보기 용도라 입력이 따라가지 않는다.
   function selectCalendarDate(ds) {
     if (!ds) return;
     if (ds === state.date) { renderCalendar(); return; }
+    // 달력 클릭은 기록 둘러보기·지급 시작일 고르기 용도라, 상단 날짜 칸의
+    // "날짜 이동"(v11)과 달리 기존 동작(입력 비움)을 유지한다.
     state.date = ds;
     var di = $('#dateInput');
     if (di) di.value = ds;
     clearShiftInputs();
     inputsDirty = false;
     calYearMonth = null;
+    hideDateMoveConfirm();
     save();
     renderAll();
   }
@@ -1207,20 +1351,30 @@
   var dateInput = $('#dateInput');
   if (!state.date) state.date = todayStr();
   dateInput.value = state.date;
-  // 날짜 변경 안전장치: 날짜만 바꾸면 입력 총액을 비우고(명단 선택은 유지),
-  // inputsDirty를 false로 둬서 이전 날짜의 결과가 새 날짜에 덮어씌워지거나
-  // 새 날짜의 기존 기록이 지워지지 않게 한다. 사용자가 실제로 입력하면
-  // 그때부터 그 날짜의 기록으로 저장된다.
+  // 날짜 변경 (v11):
+  // - 입력이 있는 상태면 "날짜 이동" — 입력과 그 기록이 새 날짜로 따라간다
+  //   (attemptDateChange 참고). 새 날짜에 다른 기록이 있으면 덮기 전에
+  //   인라인 확인 바에서 확인받는다.
+  // - 입력이 없으면 기존 안전장치 그대로: 입력을 비우고 inputsDirty를
+  //   false로 둬서, 둘러보러 간 날짜의 기존 기록이 지워지거나 이전 날짜
+  //   결과가 덮어씌워지지 않게 한다.
   dateInput.addEventListener('change', function () {
     var nd = dateInput.value;
     if (!nd) { dateInput.value = state.date; return; }
+    // 같은 날짜면 아무것도 하지 않는다. 특히 덮어쓰기 확인 바가 떠 있는
+    // 동안에는 바를 닫지 않는다 — 충돌 시 입력값이 원래 날짜로 되돌려진
+    // 상태에서 change가 한 번 더 와도 확인이 사라지면 안 되기 때문이다.
+    // (바는 [그대로 두기]·[옮기고 덮어쓰기]·달력 선택 등으로 닫힌다.)
     if (nd === state.date) return;
-    state.date = nd;
-    clearShiftInputs();
-    inputsDirty = false;
-    calYearMonth = null;
-    save();
-    renderAll();
+    attemptDateChange(nd);
+  });
+
+  // 날짜 이동 덮어쓰기 확인 바 (v11)
+  $('#dateMoveYesBtn').addEventListener('click', function () {
+    if (pendingDateMove) applyDateMove(pendingDateMove.newDate);
+  });
+  $('#dateMoveNoBtn').addEventListener('click', function () {
+    hideDateMoveConfirm();
   });
 
   // 달력 월 이동 (v7)
@@ -1271,6 +1425,7 @@
     state.date = todayStr();
     dateInput.value = state.date;
     calYearMonth = null;
+    hideDateMoveConfirm();
     inputsDirty = true; // 오늘 기록도 함께 지워지게 (총액 0 → 기록 삭제)
     save();
     renderAll();
