@@ -222,29 +222,88 @@ table.result tfoot td { font-weight: 700; border-bottom: none; }
 .verify.bad { background: var(--warn-bg); color: var(--warn); }
 .result-warnings { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
 
-/* 주급 정산표 (v4) — 주는 일요일 시작 ~ 토요일 끝 */
-.payroll-nav {
+/* 완료 접힘 (v7) */
+.btn:disabled { opacity: .55; cursor: default; }
+.complete-btn { width: 100%; margin-top: 14px; }
+.edit-btn { width: 100%; margin-top: 12px; }
+.done-box { margin-top: 14px; }
+.done-title { font-size: 19px; font-weight: 800; color: var(--ok); margin: 0 0 6px; }
+.done-line {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border);
+}
+.done-name { font-weight: 700; font-size: 18px; }
+.done-sub { color: var(--muted); font-size: 13.5px; font-weight: 600; margin-top: 2px; }
+.done-amt { font-size: 21px; font-weight: 800; white-space: nowrap; }
+.done-total-row { border-bottom: none; }
+.done-total-row .done-amt { color: var(--accent); }
+
+/* 날짜별 기록 달력 (v7) — 주는 일요일 시작 */
+.cal-nav {
   display: flex; align-items: center; justify-content: space-between;
-  gap: 8px; margin-bottom: 14px;
+  gap: 8px; margin-bottom: 12px;
 }
-.payroll-nav .btn-ghost { white-space: nowrap; }
-.payroll-range { font-weight: 700; font-size: 15px; text-align: center; }
-.payroll-week { margin-bottom: 20px; }
-.payroll-week-label { font-weight: 700; margin: 0 0 8px; font-size: 16px; }
-.payroll-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; max-width: 100%; }
-table.payroll { width: 100%; border-collapse: collapse; min-width: 470px; }
-table.payroll th, table.payroll td {
-  padding: 6px 3px; text-align: right; font-size: 12.5px; white-space: nowrap;
+.cal-nav .btn-ghost { white-space: nowrap; }
+.cal-month-label { font-weight: 800; font-size: 18px; text-align: center; }
+.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.cal-dow { text-align: center; font-size: 13px; font-weight: 700; color: var(--muted); padding: 4px 0; }
+.cal-dow.sun { color: var(--warn); }
+.cal-dow.sat { color: var(--accent); }
+.cal-blank { min-height: 54px; }
+.cal-day {
+  min-height: 54px; min-width: 0; padding: 5px 2px;
+  border: 1.5px solid var(--border); border-radius: 10px;
+  background: var(--chip); color: var(--text);
+  display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
+  gap: 2px; cursor: pointer; font: inherit;
 }
-table.payroll th:first-child, table.payroll td:first-child { text-align: left; }
-table.payroll thead th { color: var(--muted); font-size: 13px; border-bottom: 2px solid var(--border); }
-table.payroll thead th .dow-date { display: block; font-size: 10.5px; font-weight: 600; }
-table.payroll tbody td { border-bottom: 1px solid var(--border); }
-table.payroll .p-name { font-weight: 700; font-size: 13.5px; }
-table.payroll td.no-rec { color: var(--muted); }
-table.payroll .p-week-total { font-weight: 800; font-size: 14.5px; }
-.payroll-grand { border-top: 2px solid var(--border); padding-top: 12px; }
-.payroll-grand h3 { margin: 0 0 6px; font-size: 19px; }
+.cal-day .d-num { font-size: 15px; font-weight: 700; line-height: 1.15; }
+.cal-day.sun .d-num { color: var(--warn); }
+.cal-day.sat .d-num { color: var(--accent); }
+.cal-day .d-total { font-size: 11px; font-weight: 800; color: var(--accent); }
+.cal-day.has-record { background: var(--accent-soft); border-color: var(--accent); }
+.cal-day.is-today { border-color: var(--text); border-width: 2.5px; }
+.cal-day.is-selected { background: var(--accent); border-color: var(--accent); color: #fff; }
+.cal-day.is-selected .d-num, .cal-day.is-selected .d-total { color: #fff; }
+
+/* 날짜별 내역 (달력 아래) */
+#dayDetail { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
+.detail-title { font-weight: 800; font-size: 17px; margin: 0 0 6px; }
+.detail-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  padding: 6px 0; border-bottom: 1px solid var(--border);
+}
+.detail-name { font-weight: 700; }
+.detail-amt { font-weight: 800; }
+.detail-total { border-bottom: none; }
+.detail-total .detail-amt { color: var(--accent); font-size: 19px; }
+
+/* 팁 지급 (v7) */
+.payout-bar { margin-top: 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.payout-range-label { font-weight: 700; font-size: 15px; color: var(--muted); }
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, .55); z-index: 100;
+  display: flex; align-items: flex-end; justify-content: center;
+}
+.modal-overlay[hidden] { display: none; }
+.modal-panel {
+  background: var(--card); color: var(--text);
+  width: 100%; max-width: 640px; max-height: 88vh; overflow-y: auto;
+  border-radius: 18px 18px 0 0; padding: 20px 16px 24px;
+}
+.modal-panel h3 { margin: 0 0 6px; font-size: 21px; }
+.payout-period { color: var(--muted); font-weight: 700; margin: 0 0 12px; }
+.payout-days-title { margin: 18px 0 4px; font-size: 17px; }
+.payout-day { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.payout-day-head { font-weight: 700; margin: 0; }
+.payout-day-names {
+  color: var(--muted); font-weight: 600; margin: 2px 0 0;
+  font-size: 14.5px; overflow-wrap: break-word;
+}
+.payout-actions { display: flex; gap: 8px; margin-top: 18px; flex-wrap: wrap; }
+.payout-actions .btn { flex: 1; white-space: nowrap; padding: 8px 10px; }
+
+/* 지급 내역의 인당 합계 행 (구 정산표에서 승계) */
 .grand-row {
   display: flex; justify-content: space-between; align-items: baseline;
   padding: 7px 0; border-bottom: 1px solid var(--border);

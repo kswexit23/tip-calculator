@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>팁톡 TipTalk</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💰</text></svg>">
-<link rel="stylesheet" href="css/style.css?v=6">
+<link rel="stylesheet" href="css/style.css?v=7">
 </head>
 <body>
 <header class="topbar">
@@ -41,19 +41,35 @@
     <div id="resultBody"></div>
   </section>
 
-  <section class="card" id="payrollCard">
-    <h2>주급 정산표</h2>
-    <div class="payroll-nav">
-      <button id="payPrevBtn" class="btn btn-ghost" type="button">‹ 이전 2주</button>
-      <span id="payrollRange" class="payroll-range"></span>
-      <button id="payNextBtn" class="btn btn-ghost" type="button">다음 2주 ›</button>
+  <section class="card" id="calendarCard">
+    <h2>날짜별 기록</h2>
+    <div class="cal-nav">
+      <button id="calPrevBtn" class="btn btn-ghost" type="button">‹ 이전 달</button>
+      <span id="calMonthLabel" class="cal-month-label"></span>
+      <button id="calNextBtn" class="btn btn-ghost" type="button">다음 달 ›</button>
     </div>
-    <div id="payrollBody"></div>
+    <div id="calendarBody"></div>
+    <div id="dayDetail"></div>
+    <div class="payout-bar">
+      <button id="payoutBtn" class="btn btn-primary" type="button">팁 지급하기</button>
+      <span id="payoutRangeLabel" class="payout-range-label"></span>
+    </div>
   </section>
 </main>
 
-<script src="js/calc.js?v=6"></script>
-<script src="js/photo.js?v=6"></script>
-<script src="js/app.js?v=6"></script>
+<div id="payoutModal" class="modal-overlay" hidden>
+  <div class="modal-panel">
+    <div id="payoutContent"></div>
+    <div class="payout-actions">
+      <button id="payoutCsvBtn" class="btn" type="button">CSV 다운로드</button>
+      <button id="payoutCopyBtn" class="btn" type="button">텍스트 복사</button>
+      <button id="payoutCloseBtn" class="btn btn-primary" type="button">닫기</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/calc.js?v=7"></script>
+<script src="js/photo.js?v=7"></script>
+<script src="js/app.js?v=7"></script>
 </body>
 </html>

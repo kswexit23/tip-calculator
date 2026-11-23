@@ -1,16 +1,20 @@
 'use strict';
 /*
- * 팁톡(TipTalk) UI (v6)
+ * 팁톡(TipTalk) UI (v7)
  * 기본 흐름: 일한 사람 칩 선택 → 팁 총액 입력(또는 사진) → 결과 확인
  * v6: 시간/구간 방식 폐기 → "선지급" 방식. 접힌 옵션에서 먼저 온 사람에게
- *     먼저 떼어줄 금액을 지정하면, 총액에서 그만큼을 먼저 주고 → 남은 금액의
- *     주방 10% → 나머지를 서버 전원이 균등 분배한다 (calc.js 참고).
+ *     먼저 떼어줄 금액을 지정하면, 총액에서 그만큼을 먼저 주고 → 나머지를
+ *     서버 전원이 균등 분배한다 (calc.js 참고).
  *     카드 내부 순서도 칩 → 사진 → 총액 → 선지급 옵션으로 재배열.
+ * v7: 계산 순서 정정 — 주방 10%는 선지급에서도 먼저 간다 (주방 총액 = 전체의 10%).
+ *     시프트 카드에 "완료" 버튼 추가: 누르면 입력이 접히고 요약이 남는다.
+ *     맨 아래 주급 정산표를 날짜별 기록 달력으로 교체하고, 선택 날짜부터
+ *     2주 기간의 "팁 지급하기"(내역 화면 + CSV 다운로드 + 텍스트 복사)를 붙였다.
  * v3: 시프트 카드의 "사진으로 채우기" — 정산지 사진을 올리면 판독 데몬이 읽어서
  *     팁 총액을 자동 입력하고, 손글씨 이름은 명단과 매칭해 "제안" 칩으로만 표시한다
  *     (확정은 사용자가 탭해야 한다). 사진 통신은 js/photo.js (TipPhoto)가 담당.
  * v4: 날짜별 인당 합계 자동 저장(localStorage 'tiptalk_history_v1') +
- *     맨 아래 "주급 정산표" (일요일~토요일 주 × 2주 + 인당 2주 토탈).
+ *     맨 아래 날짜별 기록 표시 (v7에서 달력으로 교체).
  *     사진 판독 성공 시 정산지 날짜로 날짜 선택이 자동 변경된다.
  *     날짜를 바꾸면 입력 총액은 비워진다(명단 선택은 유지) — 엉뚱한 날짜에
  *     이전 날짜 결과가 덮어씌워지는 사고를 막기 위한 안전장치.
@@ -53,6 +57,7 @@
   function freshShift(start, end) {
     return {
       total: '', start: start, end: end, selected: {}, prepays: [], advancedOpen: false,
+      done: false,     // v7: "완료"를 누르면 입력이 접히고 요약만 남는다
       suggested: {},   // 사진 판독이 제안한 사람 {personId: 읽은 이름} — 확정은 사용자가 탭
       photoInfo: null, // 마지막 사진 판독 참고 정보 {purchase, tickets, time, fromOther, unmatched}
     };
@@ -112,8 +117,12 @@
       ['am', 'pm'].forEach(function (k) {
         if (!s.shifts[k].suggested) s.shifts[k].suggested = {};
         if (s.shifts[k].photoInfo === undefined) s.shifts[k].photoInfo = null;
+        // v7: 완료(done) 필드 보정 (v6 이전 저장본에는 없음)
+        s.shifts[k].done = !!s.shifts[k].done;
         // v5: 일한 사람은 매번 직접 눌러 고른다 — 저장된 선택은 불러오지 않는다.
-        s.shifts[k].selected = {};
+        // v7 예외: "완료"한 시프트는 접힌 요약에 금액을 계속 보여줘야 해서
+        // 선택을 유지한다 (수정을 누른 뒤 닫으면 그때부터 다시 비워진다).
+        if (!s.shifts[k].done) s.shifts[k].selected = {};
         // v6: 시간/구간 방식 폐기 — segAmounts는 버리고 prepays로 정규화한다.
         delete s.shifts[k].segAmounts;
         if (!Array.isArray(s.shifts[k].prepays)) s.shifts[k].prepays = [];
@@ -169,8 +178,6 @@
   // 현재 화면 입력을 사용자가 실제로 건드렸을 때만 true. 날짜만 바꿔서 표를
   // 보러 온 경우에는 false라서 기존 기록을 지우거나 덮지 않는다.
   var inputsDirty = false;
-  // 주급 정산표 2주 윈도우 이동량 (0 = 선택 날짜 기준, ±1 = 2주씩 이동)
-  var payrollOffset = 0;
 
   // 계산 결과를 현재 선택 날짜의 기록으로 반영한다.
   // - 총액 0 → 그 날짜 기록 삭제 (사용자가 입력을 비운 경우)
@@ -201,11 +208,12 @@
     }
     if (changed) {
       saveHistory(hist);
-      renderPayroll();
+      renderCalendar();
     }
   }
 
   // 두 시프트의 입력(금액·선지급·사진 정보)과 사람 선택을 비운다.
+  // 완료(done) 상태도 함께 해제한다 (v7).
   // 시프트 기본 시간은 유지한다. 날짜 변경·사진 날짜 이동·입력 지우기가 공용.
   function clearShiftInputs() {
     SHIFT_DEFS.forEach(function (d) {
@@ -215,6 +223,7 @@
       sh.suggested = {};
       sh.photoInfo = null;
       sh.selected = {};
+      sh.done = false;
     });
   }
 
@@ -291,7 +300,7 @@
       var di = $('#dateInput');
       if (di) di.value = photoDate;
       clearShiftInputs();
-      payrollOffset = 0;
+      calYearMonth = null;
     }
     inputsDirty = true;
     var targetKey = TipPhoto.decideShift(row.settled_time) || fromKey;
@@ -371,12 +380,62 @@
   }
 
   // ---------- 시프트 카드 렌더 ----------
+  // 완료된 시프트의 요약 (v7): 사람별 금액 + 구성(선지급 순액·주방 몫·나눈 몫)
+  function doneSummaryHtml(shift, result) {
+    var rows = state.roster.filter(function (p) {
+      return result.perPerson[p.id] != null || shift.selected[p.id];
+    });
+    var lines = rows.map(function (p) {
+      var d = result.perPersonDetail[p.id] ||
+        { prepayCents: 0, kitchenCents: 0, serverCents: 0 };
+      var parts = [];
+      if (d.prepayCents > 0) parts.push('먼저 떼어줌 ' + fmt(d.prepayCents));
+      if (d.kitchenCents > 0) parts.push('주방 몫 ' + fmt(d.kitchenCents));
+      if (d.serverCents > 0 && (d.prepayCents > 0 || d.kitchenCents > 0)) {
+        parts.push('나눈 몫 ' + fmt(d.serverCents));
+      }
+      var sub = parts.length > 0
+        ? '<div class="done-sub">' + esc(parts.join(' + ')) + '</div>' : '';
+      return '<div class="done-line"><div class="done-person">' +
+        '<span class="done-name">' + esc(p.name) +
+        (p.role === 'kitchen' ? ' <span class="role-badge kitchen">주방</span>' : '') +
+        '</span>' + sub + '</div>' +
+        '<span class="done-amt">' + fmt(result.perPerson[p.id]) + '</span></div>';
+    }).join('');
+    if (!lines) lines = '<p class="result-empty">표시할 내역이 없어요.</p>';
+    return '<div class="done-box"><p class="done-title">✓ 입력 완료</p>' +
+      '<div class="done-lines">' + lines + '</div>' +
+      '<div class="done-line done-total-row"><span class="done-name">팁 총액</span>' +
+      '<span class="done-amt">' + fmt(result.totalCents) + '</span></div>' +
+      '<button type="button" class="btn edit-btn" data-edit-btn>수정</button></div>';
+  }
+
   function renderShift(key) {
     var def = SHIFT_DEFS.filter(function (d) { return d.key === key; })[0];
     var shift = state.shifts[key];
     var section = $('#shift-' + key);
     var computed = computeForShift(shift);
     var result = computed.result;
+
+    // v7: 완료된 시프트는 입력을 접고 요약만 보여준다.
+    if (shift.done) {
+      section.innerHTML =
+        '<div class="shift-head"><h2>' + def.title + '</h2>' +
+        '<span class="shift-time-label">' + esc(shift.start) + ' ~ ' + esc(shift.end) + '</span></div>' +
+        doneSummaryHtml(shift, result) +
+        '<div class="shift-warnings" data-warnings></div>';
+      var editBtn = $('[data-edit-btn]', section);
+      if (editBtn) {
+        editBtn.addEventListener('click', function () {
+          shift.done = false;
+          save();
+          renderShift(key);
+          renderResults();
+        });
+      }
+      updateShiftWarnings(key, section);
+      return;
+    }
 
     var chipsHtml = state.roster.map(function (p) {
       var on = !!shift.selected[p.id];
@@ -395,9 +454,9 @@
     }).map(function (id) { return personById(id).name; });
     var kitchenHtml = '';
     if (kitchenNames.length > 0) {
-      var kitchenBasis = result.prepayTotalCents > 0 ? '먼저 떼어준 금액을 뺀 남은 금액' : '팁 전체';
+      // v7: 주방 몫은 선지급에서도 먼저 가므로 언제나 팁 전체의 10%다.
       kitchenHtml = '<p class="kitchen-note">🍳 주방 ' + esc(kitchenNames.join(', ')) +
-        ' — ' + kitchenBasis + '의 10%인 <span data-kitchen-amount>' + fmt(result.kitchenTotalCents) +
+        ' — 팁 전체의 10%인 <span data-kitchen-amount>' + fmt(result.kitchenTotalCents) +
         '</span>를 나눠 가져요.</p>';
     }
 
@@ -427,7 +486,8 @@
         });
         advHtml += '<button type="button" class="btn prepay-add" data-prepay-add>+ 먼저 떼어주기 추가</button>';
         advHtml += '<p class="hint">먼저 온 사람이 혼자 일한 몫을 영수증에서 보고 먼저 떼어줘요. ' +
-          '남은 금액에서 주방 10%를 떼고, 나머지는 일한 서버가 똑같이 나눠요. ' +
+          '먼저 떼어준 금액에서도 10%는 주방 몫으로 가고(주방이 있을 때), 남은 금액에서도 ' +
+          '주방이 10%를 가져간 뒤 나머지는 일한 서버가 똑같이 나눠요. ' +
           '먼저 떼어준 사람도 똑같이 나누는 데는 그대로 참여해요.</p>';
       }
       advHtml += '</div></div>';
@@ -477,7 +537,10 @@
         (shift.advancedOpen ? '먼저 떼어주기 닫기' : '먼저 온 사람에게 먼저 떼어줄 금액이 있으면 눌러주세요') +
       '</button>' +
       advHtml +
-      '<div class="shift-warnings" data-warnings></div>';
+      '<div class="shift-warnings" data-warnings></div>' +
+      '<button type="button" class="btn btn-primary complete-btn" data-done-btn' +
+        (TipCalc.toCents(shift.total) > 0 && result.balanced ? '' : ' disabled') +
+        '>완료</button>';
 
     attachShiftListeners(key, section);
     updateShiftWarnings(key, section);
@@ -494,6 +557,11 @@
     }
     var kAmt = $('[data-kitchen-amount]', section);
     if (kAmt) kAmt.textContent = fmt(result.kitchenTotalCents);
+    // v7: 완료 버튼은 계산이 유효할 때만 (총액 있고 합계 검증 OK)
+    var doneBtn = $('[data-done-btn]', section);
+    if (doneBtn) {
+      doneBtn.disabled = !(TipCalc.toCents(shift.total) > 0 && result.balanced);
+    }
   }
 
   function attachShiftListeners(key, section) {
@@ -585,6 +653,19 @@
         renderResults();
       });
     }
+
+    // v7: 완료 버튼 — 유효한 계산일 때만 눌리고, 누르면 카드가 접힌다.
+    var doneBtn = $('[data-done-btn]', section);
+    if (doneBtn) {
+      doneBtn.addEventListener('click', function () {
+        var r = computeForShift(shift).result;
+        if (!(TipCalc.toCents(shift.total) > 0 && r.balanced)) return;
+        shift.done = true;
+        save();
+        renderShift(key);
+        renderResults();
+      });
+    }
   }
 
   // ---------- 결과 렌더 ----------
@@ -638,38 +719,21 @@
     body.innerHTML = html;
   }
 
-  // ---------- 주급 정산표 렌더 (v4) ----------
-  // 주는 일요일 시작 ~ 토요일 끝. 윈도우 = 선택 날짜가 속한 주 + 그 전주.
+  // ---------- 날짜별 기록 달력 (v7: 주급 정산표 대체) ----------
+  // 달력에서 날짜를 고르면 그날의 인당 내역이 아래에 뜨고, 선택 날짜부터
+  // 2주(14일) 기간으로 "팁 지급하기" 내역을 만들 수 있다.
   var DOW_LABELS = ['일', '월', '화', '수', '목', '금', '토'];
+  // 달력에 보고 있는 달 {y, m}. null이면 선택 날짜의 달을 따라간다.
+  var calYearMonth = null;
   function rosterIndexOf(name) {
     for (var i = 0; i < state.roster.length; i++) {
       if (state.roster[i].name === name) return i;
     }
     return -1;
   }
-  function renderPayroll() {
-    var body = $('#payrollBody');
-    if (!body) return;
-    var rangeEl = $('#payrollRange');
-    var hist = loadHistory();
-    var anchor = parseDateStr(state.date) || new Date();
-    var winStart = addDays(sundayOf(anchor), -7 + payrollOffset * 14);
-    var winEnd = addDays(winStart, 13);
-    if (rangeEl) {
-      rangeEl.textContent = dayLabel(winStart) + '(일) ~ ' + dayLabel(winEnd) + '(토)';
-    }
-    var days = [];
-    for (var i = 0; i < 14; i++) days.push(addDays(winStart, i));
-
-    // 이 2주 기록에 등장하는 인원 수집 (명단 순서 우선, 나머지는 첫 등장 순)
-    var seen = {};
-    var names = [];
-    days.forEach(function (d) {
-      var e = hist[fmtDateStr(d)];
-      if (e) Object.keys(e).forEach(function (n) {
-        if (!seen[n]) { seen[n] = true; names.push(n); }
-      });
-    });
+  // 기록 항목의 이름들을 명단 순서로 정렬 (명단에 없으면 뒤에, 등장 순)
+  function sortedNames(entry) {
+    var names = Object.keys(entry || {});
     names.sort(function (a, b) {
       var ia = rosterIndexOf(a);
       var ib = rosterIndexOf(b);
@@ -678,61 +742,220 @@
       if (ib >= 0) return 1;
       return 0;
     });
+    return names;
+  }
+  function dayTotalCents(entry) {
+    return Object.keys(entry || {}).reduce(function (a, n) {
+      return a + Math.round(entry[n] * 100);
+    }, 0);
+  }
 
-    if (names.length === 0) {
-      body.innerHTML = '<p class="result-empty">이 2주에는 저장된 정산 기록이 없어요. ' +
-        '날짜를 골라 팁 정산을 하면 여기에 자동으로 쌓여요.</p>';
+  function renderCalendar() {
+    var body = $('#calendarBody');
+    if (!body) return;
+    var label = $('#calMonthLabel');
+    var sel = parseDateStr(state.date) || new Date();
+    var viewY = calYearMonth ? calYearMonth.y : sel.getFullYear();
+    var viewM = calYearMonth ? calYearMonth.m : sel.getMonth();
+    if (label) label.textContent = viewY + '년 ' + (viewM + 1) + '월';
+    var hist = loadHistory();
+    var firstDow = new Date(viewY, viewM, 1).getDay();
+    var daysInMonth = new Date(viewY, viewM + 1, 0).getDate();
+    var todayS = todayStr();
+    var selS = fmtDateStr(sel);
+    var html = '<div class="cal-grid">';
+    DOW_LABELS.forEach(function (d, i) {
+      html += '<div class="cal-dow' + (i === 0 ? ' sun' : i === 6 ? ' sat' : '') + '">' + d + '</div>';
+    });
+    for (var b = 0; b < firstDow; b++) html += '<span class="cal-blank"></span>';
+    for (var day = 1; day <= daysInMonth; day++) {
+      var dObj = new Date(viewY, viewM, day);
+      var ds = fmtDateStr(dObj);
+      var entry = hist[ds];
+      var has = entry && Object.keys(entry).length > 0;
+      var cls = 'cal-day' + (dObj.getDay() === 0 ? ' sun' : dObj.getDay() === 6 ? ' sat' : '') +
+        (has ? ' has-record' : '') + (ds === todayS ? ' is-today' : '') +
+        (ds === selS ? ' is-selected' : '');
+      html += '<button type="button" class="' + cls + '" data-cal-date="' + ds + '">' +
+        '<span class="d-num">' + day + '</span>' +
+        (has ? '<span class="d-total">$' +
+          Math.round(dayTotalCents(entry) / 100).toLocaleString('en-US') + '</span>' : '') +
+        '</button>';
+    }
+    html += '</div>';
+    body.innerHTML = html;
+    body.querySelectorAll('[data-cal-date]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        selectCalendarDate(btn.getAttribute('data-cal-date'));
+      });
+    });
+    renderDayDetail(sel);
+    var rangeEl = $('#payoutRangeLabel');
+    if (rangeEl) {
+      rangeEl.textContent = dayLabel(sel) + '부터 2주 (' + dayLabel(sel) + ' ~ ' +
+        dayLabel(addDays(sel, 13)) + ')';
+    }
+  }
+
+  // 달력에서 날짜를 고르면 위쪽 날짜 선택과 같은 동작을 한다:
+  // 날짜가 바뀌면 입력은 비워지고(안전장치), 그날 기록이 아래에 표시된다.
+  function selectCalendarDate(ds) {
+    if (!ds) return;
+    if (ds === state.date) { renderCalendar(); return; }
+    state.date = ds;
+    var di = $('#dateInput');
+    if (di) di.value = ds;
+    clearShiftInputs();
+    inputsDirty = false;
+    calYearMonth = null;
+    save();
+    renderAll();
+  }
+
+  function renderDayDetail(sel) {
+    var box = $('#dayDetail');
+    if (!box) return;
+    var hist = loadHistory();
+    var entry = hist[fmtDateStr(sel)];
+    var title = '<p class="detail-title">' + dayLabel(sel) + ' (' +
+      DOW_LABELS[sel.getDay()] + '요일)</p>';
+    if (!entry || Object.keys(entry).length === 0) {
+      box.innerHTML = title + '<p class="result-empty">기록이 없어요.</p>';
       return;
     }
-
-    function centsOf(dateStr, name) {
-      var e = hist[dateStr];
-      if (!e || e[name] == null) return null;
-      return Math.round(e[name] * 100);
-    }
-
-    var html = '';
-    var twoWeek = {};
-    for (var w = 0; w < 2; w++) {
-      var wDays = days.slice(w * 7, w * 7 + 7);
-      html += '<div class="payroll-week"><p class="payroll-week-label">' +
-        dayLabel(wDays[0]) + '(일) ~ ' + dayLabel(wDays[6]) + '(토)</p>';
-      html += '<div class="payroll-scroll"><table class="payroll"><thead><tr><th>이름</th>';
-      wDays.forEach(function (d) {
-        html += '<th>' + DOW_LABELS[d.getDay()] +
-          '<span class="dow-date">' + (d.getMonth() + 1) + '/' + d.getDate() + '</span></th>';
-      });
-      html += '<th>주 합계</th></tr></thead><tbody>';
-      names.forEach(function (name) {
-        var wSum = 0;
-        var has = false;
-        html += '<tr><td class="p-name">' + esc(name) + '</td>';
-        wDays.forEach(function (d) {
-          var c = centsOf(fmtDateStr(d), name);
-          if (c == null) {
-            html += '<td class="no-rec">–</td>';
-          } else {
-            html += '<td>' + fmt(c) + '</td>';
-            wSum += c;
-            has = true;
-          }
-        });
-        html += '<td class="p-week-total">' + (has ? fmt(wSum) : '–') + '</td></tr>';
-        twoWeek[name] = (twoWeek[name] || 0) + wSum;
-      });
-      html += '</tbody></table></div></div>';
-    }
-
-    var grand = 0;
-    html += '<div class="payroll-grand"><h3>2주 토탈</h3>';
-    names.forEach(function (name) {
-      grand += twoWeek[name] || 0;
-      html += '<div class="grand-row"><span class="grand-name">' + esc(name) + '</span>' +
-        '<span class="grand-amount">' + fmt(twoWeek[name] || 0) + '</span></div>';
+    var html = title;
+    sortedNames(entry).forEach(function (name) {
+      html += '<div class="detail-row"><span class="detail-name">' + esc(name) + '</span>' +
+        '<span class="detail-amt">' + fmt(Math.round(entry[name] * 100)) + '</span></div>';
     });
-    html += '<div class="grand-row grand-total"><span class="grand-name">전체 총합</span>' +
-      '<span class="grand-amount">' + fmt(grand) + '</span></div></div>';
-    body.innerHTML = html;
+    html += '<div class="detail-row detail-total"><span class="detail-name">합계</span>' +
+      '<span class="detail-amt">' + fmt(dayTotalCents(entry)) + '</span></div>';
+    box.innerHTML = html;
+  }
+
+  function moveCalMonth(delta) {
+    var sel = parseDateStr(state.date) || new Date();
+    var y = calYearMonth ? calYearMonth.y : sel.getFullYear();
+    var m = calYearMonth ? calYearMonth.m : sel.getMonth();
+    var d = new Date(y, m + delta, 1);
+    calYearMonth = { y: d.getFullYear(), m: d.getMonth() };
+    renderCalendar();
+  }
+
+  // ---------- 팁 지급 (v7): 선택 날짜부터 2주(14일) ----------
+  var currentPayout = null; // {startStr, endStr, csv, text, hasData}
+  function computePayout() {
+    var sel = parseDateStr(state.date) || new Date();
+    var hist = loadHistory();
+    var days = [];
+    var perPerson = {};
+    for (var i = 0; i < 14; i++) {
+      var d = addDays(sel, i);
+      var ds = fmtDateStr(d);
+      var entry = hist[ds];
+      if (entry && Object.keys(entry).length > 0) {
+        var rows = sortedNames(entry).map(function (name) {
+          var c = Math.round(entry[name] * 100);
+          perPerson[name] = (perPerson[name] || 0) + c;
+          return { name: name, cents: c };
+        });
+        days.push({ date: d, dateStr: ds, rows: rows, totalCents: dayTotalCents(entry) });
+      }
+    }
+    var names = Object.keys(perPerson);
+    names.sort(function (a, b) {
+      var ia = rosterIndexOf(a);
+      var ib = rosterIndexOf(b);
+      if (ia >= 0 && ib >= 0) return ia - ib;
+      if (ia >= 0) return -1;
+      if (ib >= 0) return 1;
+      return 0;
+    });
+    var grand = names.reduce(function (a, n) { return a + perPerson[n]; }, 0);
+    return {
+      start: sel, end: addDays(sel, 13),
+      startStr: fmtDateStr(sel), endStr: fmtDateStr(addDays(sel, 13)),
+      days: days, names: names, perPerson: perPerson, grandCents: grand,
+    };
+  }
+  function csvCell(s) {
+    s = String(s);
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }
+  function dollarsStr(c) { return (c / 100).toFixed(2); }
+  function buildPayoutCsv(p) {
+    var lines = [];
+    lines.push('팁톡 팁 지급 내역');
+    lines.push('기간,' + p.startStr + ' ~ ' + p.endStr);
+    lines.push('이름,합계');
+    p.names.forEach(function (n) {
+      lines.push(csvCell(n) + ',' + dollarsStr(p.perPerson[n]));
+    });
+    lines.push('전체 총합,' + dollarsStr(p.grandCents));
+    lines.push('');
+    lines.push('날짜,이름,금액');
+    p.days.forEach(function (d) {
+      d.rows.forEach(function (r) {
+        lines.push(d.dateStr + ',' + csvCell(r.name) + ',' + dollarsStr(r.cents));
+      });
+    });
+    return lines.join('\n');
+  }
+  function buildPayoutText(p) {
+    var lines = ['[팁 지급] ' + dayLabel(p.start) + ' ~ ' + dayLabel(p.end)];
+    p.names.forEach(function (n) { lines.push(n + ' ' + fmt(p.perPerson[n])); });
+    lines.push('전체 총합 ' + fmt(p.grandCents));
+    return lines.join('\n');
+  }
+  function openPayout() {
+    var p = computePayout();
+    var csv = buildPayoutCsv(p);
+    var text = buildPayoutText(p);
+    currentPayout = {
+      startStr: p.startStr, endStr: p.endStr,
+      csv: csv, text: text, hasData: p.days.length > 0,
+    };
+    // 테스트·디버깅용으로 마지막 지급 내역을 노출한다.
+    window.__tiptalkPayout = {
+      start: p.startStr, end: p.endStr, csv: csv, text: text,
+      grandCents: p.grandCents, perPerson: Object.assign({}, p.perPerson),
+    };
+    var html = '<h3>팁 지급 내역</h3>' +
+      '<p class="payout-period">' + p.start.getFullYear() + '년 ' + dayLabel(p.start) +
+      ' (' + DOW_LABELS[p.start.getDay()] + ') ~ ' + dayLabel(p.end) +
+      ' (' + DOW_LABELS[p.end.getDay()] + ') · 2주</p>';
+    if (p.days.length === 0) {
+      html += '<p class="result-empty">이 기간에는 기록이 없어요.</p>';
+    } else {
+      p.names.forEach(function (n) {
+        html += '<div class="grand-row"><span class="grand-name">' + esc(n) + '</span>' +
+          '<span class="grand-amount">' + fmt(p.perPerson[n]) + '</span></div>';
+      });
+      html += '<div class="grand-row grand-total"><span class="grand-name">전체 총합</span>' +
+        '<span class="grand-amount">' + fmt(p.grandCents) + '</span></div>';
+      html += '<h4 class="payout-days-title">날짜별 내역</h4>';
+      p.days.forEach(function (d) {
+        html += '<div class="payout-day"><p class="payout-day-head">' + dayLabel(d.date) +
+          ' (' + DOW_LABELS[d.date.getDay()] + ') — 합계 ' + fmt(d.totalCents) + '</p>' +
+          '<p class="payout-day-names">' + d.rows.map(function (r) {
+            return esc(r.name) + ' ' + fmt(r.cents);
+          }).join(' · ') + '</p></div>';
+      });
+    }
+    $('#payoutContent').innerHTML = html;
+    $('#payoutCsvBtn').disabled = !currentPayout.hasData;
+    $('#payoutCopyBtn').disabled = !currentPayout.hasData;
+    $('#payoutModal').hidden = false;
+  }
+  function fallbackCopy(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (e) { /* 무시 */ }
+    ta.remove();
   }
 
   function renderAll() {
@@ -740,7 +963,7 @@
     renderShift('am');
     renderShift('pm');
     renderResults();
-    renderPayroll();
+    renderCalendar();
   }
 
   // ---------- 전역 이벤트 ----------
@@ -803,18 +1026,51 @@
     state.date = nd;
     clearShiftInputs();
     inputsDirty = false;
-    payrollOffset = 0;
+    calYearMonth = null;
     save();
     renderAll();
   });
 
-  $('#payPrevBtn').addEventListener('click', function () {
-    payrollOffset -= 1;
-    renderPayroll();
+  // 달력 월 이동 (v7)
+  $('#calPrevBtn').addEventListener('click', function () { moveCalMonth(-1); });
+  $('#calNextBtn').addEventListener('click', function () { moveCalMonth(1); });
+
+  // 팁 지급 (v7): 내역 화면 + CSV 다운로드 + 텍스트 복사
+  $('#payoutBtn').addEventListener('click', openPayout);
+  $('#payoutCloseBtn').addEventListener('click', function () {
+    $('#payoutModal').hidden = true;
   });
-  $('#payNextBtn').addEventListener('click', function () {
-    payrollOffset += 1;
-    renderPayroll();
+  $('#payoutModal').addEventListener('click', function (e) {
+    if (e.target === this) this.hidden = true;
+  });
+  $('#payoutCsvBtn').addEventListener('click', function () {
+    if (!currentPayout || !currentPayout.hasData) return;
+    var blob = new Blob(['\uFEFF' + currentPayout.csv],
+      { type: 'text/csv;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'tiptalk-payout-' + currentPayout.startStr + '_' +
+      currentPayout.endStr + '.csv';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  });
+  $('#payoutCopyBtn').addEventListener('click', function () {
+    if (!currentPayout || !currentPayout.hasData) return;
+    var btn = this;
+    function copied() {
+      btn.textContent = '복사했어요 ✓';
+      setTimeout(function () { btn.textContent = '텍스트 복사'; }, 2000);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(currentPayout.text).then(copied)
+        .catch(function () { fallbackCopy(currentPayout.text); copied(); });
+    } else {
+      fallbackCopy(currentPayout.text);
+      copied();
+    }
   });
 
   $('#resetDayBtn').addEventListener('click', function () {
@@ -822,7 +1078,7 @@
     clearShiftInputs();
     state.date = todayStr();
     dateInput.value = state.date;
-    payrollOffset = 0;
+    calYearMonth = null;
     inputsDirty = true; // 오늘 기록도 함께 지워지게 (총액 0 → 기록 삭제)
     save();
     renderAll();
