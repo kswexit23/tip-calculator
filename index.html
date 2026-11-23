@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>팁톡 TipTalk</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💰</text></svg>">
-<link rel="stylesheet" href="css/style.css?v=3">
+<link rel="stylesheet" href="css/style.css?v=4">
 </head>
 <body>
 <header class="topbar">
@@ -40,10 +40,20 @@
     <h2>오늘 정산</h2>
     <div id="resultBody"></div>
   </section>
+
+  <section class="card" id="payrollCard">
+    <h2>주급 정산표</h2>
+    <div class="payroll-nav">
+      <button id="payPrevBtn" class="btn btn-ghost" type="button">‹ 이전 2주</button>
+      <span id="payrollRange" class="payroll-range"></span>
+      <button id="payNextBtn" class="btn btn-ghost" type="button">다음 2주 ›</button>
+    </div>
+    <div id="payrollBody"></div>
+  </section>
 </main>
 
-<script src="js/calc.js?v=3"></script>
-<script src="js/photo.js?v=3"></script>
-<script src="js/app.js?v=3"></script>
+<script src="js/calc.js?v=4"></script>
+<script src="js/photo.js?v=4"></script>
+<script src="js/app.js?v=4"></script>
 </body>
 </html>

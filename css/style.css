@@ -200,3 +200,36 @@ table.result tfoot td { font-weight: 700; border-bottom: none; }
 .verify.ok { background: var(--ok-bg); color: var(--ok); }
 .verify.bad { background: var(--warn-bg); color: var(--warn); }
 .result-warnings { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+
+/* 주급 정산표 (v4) — 주는 일요일 시작 ~ 토요일 끝 */
+.payroll-nav {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; margin-bottom: 14px;
+}
+.payroll-nav .btn-ghost { white-space: nowrap; }
+.payroll-range { font-weight: 700; font-size: 15px; text-align: center; }
+.payroll-week { margin-bottom: 20px; }
+.payroll-week-label { font-weight: 700; margin: 0 0 8px; font-size: 16px; }
+.payroll-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.payroll { width: 100%; border-collapse: collapse; min-width: 580px; }
+table.payroll th, table.payroll td {
+  padding: 7px 4px; text-align: right; font-size: 13.5px; white-space: nowrap;
+}
+table.payroll th:first-child, table.payroll td:first-child { text-align: left; }
+table.payroll thead th { color: var(--muted); font-size: 14px; border-bottom: 2px solid var(--border); }
+table.payroll thead th .dow-date { display: block; font-size: 11.5px; font-weight: 600; }
+table.payroll tbody td { border-bottom: 1px solid var(--border); }
+table.payroll .p-name { font-weight: 700; font-size: 15px; }
+table.payroll td.no-rec { color: var(--muted); }
+table.payroll .p-week-total { font-weight: 800; font-size: 14.5px; }
+.payroll-grand { border-top: 2px solid var(--border); padding-top: 12px; }
+.payroll-grand h3 { margin: 0 0 6px; font-size: 19px; }
+.grand-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  padding: 7px 0; border-bottom: 1px solid var(--border);
+}
+.grand-row .grand-name { font-weight: 700; font-size: 17px; }
+.grand-row .grand-amount { font-weight: 800; font-size: 19px; }
+.grand-row.grand-total { border-bottom: none; padding-top: 12px; }
+.grand-row.grand-total .grand-name { font-size: 20px; }
+.grand-row.grand-total .grand-amount { font-size: 27px; color: var(--accent); }

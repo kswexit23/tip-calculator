@@ -1,16 +1,22 @@
 'use strict';
 /*
- * 팁톡(TipTalk) UI (v3)
+ * 팁톡(TipTalk) UI (v4)
  * 기본 흐름: 팁 총액 입력 → 일한 사람 칩 선택 → 결과 확인 (3단계)
  * 시간·구간 입력은 접힌 고급 옵션 안에 있다.
  * v3: 시프트 카드의 "사진으로 채우기" — 정산지 사진을 올리면 판독 데몬이 읽어서
  *     팁 총액을 자동 입력하고, 손글씨 이름은 명단과 매칭해 "제안" 칩으로만 표시한다
  *     (확정은 사용자가 탭해야 한다). 사진 통신은 js/photo.js (TipPhoto)가 담당.
+ * v4: 날짜별 인당 합계 자동 저장(localStorage 'tiptalk_history_v1') +
+ *     맨 아래 "주급 정산표" (일요일~토요일 주 × 2주 + 인당 2주 토탈).
+ *     사진 판독 성공 시 정산지 날짜로 날짜 선택이 자동 변경된다.
+ *     날짜를 바꾸면 입력 총액은 비워진다(명단 선택은 유지) — 엉뚱한 날짜에
+ *     이전 날짜 결과가 덮어씌워지는 사고를 막기 위한 안전장치.
  * 상태는 localStorage에 저장 (명단 + 마지막 선택 + 입력값).
  * 계산은 전부 js/calc.js 의 순수 함수에 위임한다.
  */
 (function () {
   var LS_KEY = 'tipcalc-v1';
+  var LS_HISTORY_KEY = 'tiptalk_history_v1';
   // 기본 명단 (버전 관리). 새 직원이 기본 명단에 추가되면 버전을 올린다.
   // 로드 시 저장된 명단에 없는 기본 인원은 병합으로 추가된다 (mergeDefaultRoster 참고).
   var DEFAULT_ROSTER_VERSION = 2;
@@ -116,6 +122,93 @@
     try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch (e) { /* 저장 실패 무시 */ }
   }
 
+  // ---------- 날짜 도우미 (전부 기기 현지 날짜 기준) ----------
+  function parseDateStr(s) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s || '');
+    if (!m) return null;
+    return new Date(+m[1], +m[2] - 1, +m[3]);
+  }
+  function fmtDateStr(d) {
+    var mm = String(d.getMonth() + 1).padStart(2, '0');
+    var dd = String(d.getDate()).padStart(2, '0');
+    return d.getFullYear() + '-' + mm + '-' + dd;
+  }
+  function addDays(d, n) {
+    var x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    x.setDate(x.getDate() + n);
+    return x;
+  }
+  // 그 날짜가 속한 주의 일요일 (주는 일요일 시작 ~ 토요일 끝)
+  function sundayOf(d) { return addDays(d, -d.getDay()); }
+  function dayLabel(d) { return (d.getMonth() + 1) + '월 ' + d.getDate() + '일'; }
+
+  // ---------- 날짜별 인당 합계 기록 (v4) ----------
+  // 구조: { "YYYY-MM-DD": { "이름": 그날 인당 팁 합계(달러 숫자) } }
+  function loadHistory() {
+    try {
+      var raw = localStorage.getItem(LS_HISTORY_KEY);
+      if (!raw) return {};
+      var h = JSON.parse(raw);
+      return h && typeof h === 'object' && !Array.isArray(h) ? h : {};
+    } catch (e) { return {}; }
+  }
+  function saveHistory(h) {
+    try { localStorage.setItem(LS_HISTORY_KEY, JSON.stringify(h)); } catch (e) { /* 무시 */ }
+  }
+  // 현재 화면 입력을 사용자가 실제로 건드렸을 때만 true. 날짜만 바꿔서 표를
+  // 보러 온 경우에는 false라서 기존 기록을 지우거나 덮지 않는다.
+  var inputsDirty = false;
+  // 주급 정산표 2주 윈도우 이동량 (0 = 선택 날짜 기준, ±1 = 2주씩 이동)
+  var payrollOffset = 0;
+
+  // 계산 결과를 현재 선택 날짜의 기록으로 반영한다.
+  // - 총액 0 → 그 날짜 기록 삭제 (사용자가 입력을 비운 경우)
+  // - 합계 검증 OK → 인당 합계로 저장 (이름 기준, 주방 포함 전 인원)
+  // - 구간 미입력 등 미완성 상태 → 기존 기록을 건드리지 않는다
+  function syncHistory(day) {
+    if (!inputsDirty) return;
+    var date = state.date;
+    if (!date) return;
+    var hist = loadHistory();
+    var changed = false;
+    if (day.totalCents === 0) {
+      if (hist[date]) { delete hist[date]; changed = true; }
+    } else if (day.balanced) {
+      var entry = {};
+      Object.keys(day.perPerson).forEach(function (id) {
+        var p = personById(id);
+        // 0원인 사람은 기록하지 않는다 (총액 0인 시프트에 선택만 돼 있어도
+        // perPerson에 0으로 들어오기 때문 — 받은 팁이 있는 사람만 남긴다).
+        if (p && day.perPerson[id] > 0) entry[p.name] = Math.round(day.perPerson[id]) / 100;
+      });
+      if (Object.keys(entry).length === 0) {
+        if (hist[date]) { delete hist[date]; changed = true; }
+      } else if (JSON.stringify(hist[date]) !== JSON.stringify(entry)) {
+        hist[date] = entry;
+        changed = true;
+      }
+    }
+    if (changed) {
+      saveHistory(hist);
+      renderPayroll();
+    }
+  }
+
+  // 두 시프트의 입력(금액·구간·시간·사진 정보)만 비운다. 명단 선택과
+  // 시프트 기본 시간은 유지한다. 날짜 변경·사진 날짜 이동·입력 지우기가 공용.
+  function clearShiftInputs() {
+    SHIFT_DEFS.forEach(function (d) {
+      var sh = state.shifts[d.key];
+      sh.total = '';
+      sh.segAmounts = {};
+      sh.suggested = {};
+      sh.photoInfo = null;
+      Object.keys(sh.selected).forEach(function (id) {
+        sh.selected[id] = { start: '', end: '' };
+      });
+    });
+  }
+
   // ---------- 도우미 ----------
   function $(sel, root) { return (root || document).querySelector(sel); }
   function esc(s) {
@@ -189,7 +282,23 @@
 
   // 판독 완료 행을 시프트에 반영: 팁 총액은 정산 시각으로 판정한 시프트에 넣고,
   // 손글씨 이름은 선택하지 않고 "제안"으로만 표시한다 (확정은 사용자 탭).
+  // v4: 정산지 날짜가 현재 선택 날짜와 다르면 날짜를 그쪽으로 바꾸고 입력을
+  // 비운 뒤 채운다 — 다른 날짜의 입력이 섞여 잘못 저장되는 것을 막는다.
   function applyPhotoResult(fromKey, row) {
+    var photoDate = null;
+    if (row.settled_time && /^\d{4}-\d{2}-\d{2}/.test(String(row.settled_time))) {
+      photoDate = String(row.settled_time).slice(0, 10);
+    } else if (row.raw && row.raw.date && /^\d{4}-\d{2}-\d{2}/.test(String(row.raw.date))) {
+      photoDate = String(row.raw.date).slice(0, 10);
+    }
+    if (photoDate && photoDate !== state.date) {
+      state.date = photoDate;
+      var di = $('#dateInput');
+      if (di) di.value = photoDate;
+      clearShiftInputs();
+      payrollOffset = 0;
+    }
+    inputsDirty = true;
     var targetKey = TipPhoto.decideShift(row.settled_time) || fromKey;
     var shift = state.shifts[targetKey];
     if (row.tip_amount != null) shift.total = String(row.tip_amount);
@@ -431,6 +540,7 @@
     var totalInput = $('[data-total-input]', section);
     totalInput.addEventListener('input', function () {
       shift.total = totalInput.value;
+      inputsDirty = true;
       save();
       updateShiftWarnings(key, section);
       renderResults();
@@ -439,6 +549,7 @@
     section.querySelectorAll('[data-chip]').forEach(function (btn) {
       btn.addEventListener('click', function () {
         var id = btn.getAttribute('data-chip');
+        inputsDirty = true;
         if (shift.selected[id]) delete shift.selected[id];
         else shift.selected[id] = { start: '', end: '' };
         // 사진 판독 제안은 탭하는 순간 확정/해제되므로 제안 표시를 지운다.
@@ -470,6 +581,7 @@
     section.querySelectorAll('[data-shift-time]').forEach(function (inp) {
       inp.addEventListener('change', function () {
         shift[inp.getAttribute('data-shift-time')] = inp.value;
+        inputsDirty = true;
         save();
         renderShift(key);
         renderResults();
@@ -480,6 +592,7 @@
         var id = inp.getAttribute('data-person-id');
         if (shift.selected[id]) {
           shift.selected[id][inp.getAttribute('data-person-time')] = inp.value;
+          inputsDirty = true;
           save();
           renderShift(key);
           renderResults();
@@ -489,6 +602,7 @@
     section.querySelectorAll('[data-seg-input]').forEach(function (inp) {
       inp.addEventListener('input', function () {
         shift.segAmounts[inp.getAttribute('data-seg-input')] = inp.value;
+        inputsDirty = true;
         save();
         updateShiftWarnings(key, section);
         renderResults();
@@ -502,6 +616,7 @@
     var amRes = computeForShift(state.shifts.am).result;
     var pmRes = computeForShift(state.shifts.pm).result;
     var day = TipCalc.computeDay([amRes, pmRes]);
+    syncHistory(day);
 
     if (day.totalCents === 0) {
       body.innerHTML = '<p class="result-empty">위에서 팁 총액을 입력하면 여기에 사람별 정산이 나와요.</p>';
@@ -546,11 +661,109 @@
     body.innerHTML = html;
   }
 
+  // ---------- 주급 정산표 렌더 (v4) ----------
+  // 주는 일요일 시작 ~ 토요일 끝. 윈도우 = 선택 날짜가 속한 주 + 그 전주.
+  var DOW_LABELS = ['일', '월', '화', '수', '목', '금', '토'];
+  function rosterIndexOf(name) {
+    for (var i = 0; i < state.roster.length; i++) {
+      if (state.roster[i].name === name) return i;
+    }
+    return -1;
+  }
+  function renderPayroll() {
+    var body = $('#payrollBody');
+    if (!body) return;
+    var rangeEl = $('#payrollRange');
+    var hist = loadHistory();
+    var anchor = parseDateStr(state.date) || new Date();
+    var winStart = addDays(sundayOf(anchor), -7 + payrollOffset * 14);
+    var winEnd = addDays(winStart, 13);
+    if (rangeEl) {
+      rangeEl.textContent = dayLabel(winStart) + '(일) ~ ' + dayLabel(winEnd) + '(토)';
+    }
+    var days = [];
+    for (var i = 0; i < 14; i++) days.push(addDays(winStart, i));
+
+    // 이 2주 기록에 등장하는 인원 수집 (명단 순서 우선, 나머지는 첫 등장 순)
+    var seen = {};
+    var names = [];
+    days.forEach(function (d) {
+      var e = hist[fmtDateStr(d)];
+      if (e) Object.keys(e).forEach(function (n) {
+        if (!seen[n]) { seen[n] = true; names.push(n); }
+      });
+    });
+    names.sort(function (a, b) {
+      var ia = rosterIndexOf(a);
+      var ib = rosterIndexOf(b);
+      if (ia >= 0 && ib >= 0) return ia - ib;
+      if (ia >= 0) return -1;
+      if (ib >= 0) return 1;
+      return 0;
+    });
+
+    if (names.length === 0) {
+      body.innerHTML = '<p class="result-empty">이 2주에는 저장된 정산 기록이 없어요. ' +
+        '날짜를 골라 팁 정산을 하면 여기에 자동으로 쌓여요.</p>';
+      return;
+    }
+
+    function centsOf(dateStr, name) {
+      var e = hist[dateStr];
+      if (!e || e[name] == null) return null;
+      return Math.round(e[name] * 100);
+    }
+
+    var html = '';
+    var twoWeek = {};
+    for (var w = 0; w < 2; w++) {
+      var wDays = days.slice(w * 7, w * 7 + 7);
+      html += '<div class="payroll-week"><p class="payroll-week-label">' +
+        dayLabel(wDays[0]) + '(일) ~ ' + dayLabel(wDays[6]) + '(토)</p>';
+      html += '<div class="payroll-scroll"><table class="payroll"><thead><tr><th>이름</th>';
+      wDays.forEach(function (d) {
+        html += '<th>' + DOW_LABELS[d.getDay()] +
+          '<span class="dow-date">' + (d.getMonth() + 1) + '/' + d.getDate() + '</span></th>';
+      });
+      html += '<th>주 합계</th></tr></thead><tbody>';
+      names.forEach(function (name) {
+        var wSum = 0;
+        var has = false;
+        html += '<tr><td class="p-name">' + esc(name) + '</td>';
+        wDays.forEach(function (d) {
+          var c = centsOf(fmtDateStr(d), name);
+          if (c == null) {
+            html += '<td class="no-rec">–</td>';
+          } else {
+            html += '<td>' + fmt(c) + '</td>';
+            wSum += c;
+            has = true;
+          }
+        });
+        html += '<td class="p-week-total">' + (has ? fmt(wSum) : '–') + '</td></tr>';
+        twoWeek[name] = (twoWeek[name] || 0) + wSum;
+      });
+      html += '</tbody></table></div></div>';
+    }
+
+    var grand = 0;
+    html += '<div class="payroll-grand"><h3>2주 토탈</h3>';
+    names.forEach(function (name) {
+      grand += twoWeek[name] || 0;
+      html += '<div class="grand-row"><span class="grand-name">' + esc(name) + '</span>' +
+        '<span class="grand-amount">' + fmt(twoWeek[name] || 0) + '</span></div>';
+    });
+    html += '<div class="grand-row grand-total"><span class="grand-name">전체 총합</span>' +
+      '<span class="grand-amount">' + fmt(grand) + '</span></div></div>';
+    body.innerHTML = html;
+  }
+
   function renderAll() {
     renderRoster();
     renderShift('am');
     renderShift('pm');
     renderResults();
+    renderPayroll();
   }
 
   // ---------- 전역 이벤트 ----------
@@ -561,12 +774,14 @@
       var p = personById(roleBtn.getAttribute('data-role-toggle'));
       if (p) {
         p.role = p.role === 'kitchen' ? 'server' : 'kitchen';
+        inputsDirty = true; // 역할이 바뀌면 계산 결과가 달라지므로 기록도 갱신
         save();
         renderAll();
       }
     } else if (delBtn) {
       var target = personById(delBtn.getAttribute('data-delete-person'));
       if (target && window.confirm(target.name + ' 님을 명단에서 지울까요?')) {
+        inputsDirty = true;
         state.roster = state.roster.filter(function (x) { return x.id !== target.id; });
         SHIFT_DEFS.forEach(function (d) {
           delete state.shifts[d.key].selected[target.id];
@@ -598,26 +813,40 @@
   });
 
   var dateInput = $('#dateInput');
-  dateInput.value = state.date || todayStr();
+  if (!state.date) state.date = todayStr();
+  dateInput.value = state.date;
+  // 날짜 변경 안전장치: 날짜만 바꾸면 입력 총액을 비우고(명단 선택은 유지),
+  // inputsDirty를 false로 둬서 이전 날짜의 결과가 새 날짜에 덮어씌워지거나
+  // 새 날짜의 기존 기록이 지워지지 않게 한다. 사용자가 실제로 입력하면
+  // 그때부터 그 날짜의 기록으로 저장된다.
   dateInput.addEventListener('change', function () {
-    state.date = dateInput.value;
+    var nd = dateInput.value;
+    if (!nd) { dateInput.value = state.date; return; }
+    if (nd === state.date) return;
+    state.date = nd;
+    clearShiftInputs();
+    inputsDirty = false;
+    payrollOffset = 0;
     save();
+    renderAll();
+  });
+
+  $('#payPrevBtn').addEventListener('click', function () {
+    payrollOffset -= 1;
+    renderPayroll();
+  });
+  $('#payNextBtn').addEventListener('click', function () {
+    payrollOffset += 1;
+    renderPayroll();
   });
 
   $('#resetDayBtn').addEventListener('click', function () {
     if (!window.confirm('오늘 입력한 팁 금액과 일한 시간을 지울까요? (명단과 선택한 사람은 그대로 둬요)')) return;
-    SHIFT_DEFS.forEach(function (d) {
-      var sh = state.shifts[d.key];
-      sh.total = '';
-      sh.segAmounts = {};
-      sh.suggested = {};
-      sh.photoInfo = null;
-      Object.keys(sh.selected).forEach(function (id) {
-        sh.selected[id] = { start: '', end: '' };
-      });
-    });
+    clearShiftInputs();
     state.date = todayStr();
     dateInput.value = state.date;
+    payrollOffset = 0;
+    inputsDirty = true; // 오늘 기록도 함께 지워지게 (총액 0 → 기록 삭제)
     save();
     renderAll();
   });
