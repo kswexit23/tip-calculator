@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>팁톡 TipTalk</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💰</text></svg>">
-<link rel="stylesheet" href="css/style.css?v=7">
+<link rel="stylesheet" href="css/style.css?v=8">
 </head>
 <body>
 <header class="topbar">
@@ -19,20 +19,6 @@
 </header>
 
 <main>
-  <section class="card" id="rosterCard">
-    <h2>직원 명단</h2>
-    <div id="rosterList"></div>
-    <form id="addPersonForm" class="add-row">
-      <input id="newName" type="text" placeholder="이름 입력" autocomplete="off">
-      <select id="newRole" aria-label="역할">
-        <option value="server">서버</option>
-        <option value="kitchen">주방</option>
-      </select>
-      <button class="btn btn-primary" type="submit">추가</button>
-    </form>
-    <p class="hint">주방은 그 시프트 팁 전체의 10%를 먼저 나눠 가져요.</p>
-  </section>
-
   <section class="card shift-card" id="shift-am"></section>
   <section class="card shift-card" id="shift-pm"></section>
 
@@ -55,6 +41,20 @@
       <span id="payoutRangeLabel" class="payout-range-label"></span>
     </div>
   </section>
+
+  <section class="card" id="rosterCard">
+    <h2>직원 명단</h2>
+    <div id="rosterList"></div>
+    <form id="addPersonForm" class="add-row">
+      <input id="newName" type="text" placeholder="이름 입력" autocomplete="off">
+      <select id="newRole" aria-label="역할">
+        <option value="server">서버</option>
+        <option value="kitchen">주방</option>
+      </select>
+      <button class="btn btn-primary" type="submit">추가</button>
+    </form>
+    <p class="hint">주방은 그 시프트 팁 전체의 10%를 먼저 나눠 가져요.</p>
+  </section>
 </main>
 
 <div id="payoutModal" class="modal-overlay" hidden>
@@ -68,8 +68,8 @@
   </div>
 </div>
 
-<script src="js/calc.js?v=7"></script>
-<script src="js/photo.js?v=7"></script>
-<script src="js/app.js?v=7"></script>
+<script src="js/calc.js?v=8"></script>
+<script src="js/photo.js?v=8"></script>
+<script src="js/app.js?v=8"></script>
 </body>
 </html>
