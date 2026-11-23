@@ -64,8 +64,8 @@
         return { id: p.id, name: p.name, role: p.role, aliases: (p.aliases || []).slice() };
       }),
       shifts: {
-        am: freshShift('11:00', '15:00', ['p-jiseon', 'p-sky']),
-        pm: freshShift('16:00', '21:00', ['p-jiseon', 'p-sky']),
+        am: freshShift('11:00', '15:00'),
+        pm: freshShift('16:00', '21:00'),
       },
     };
   }
@@ -111,6 +111,8 @@
       ['am', 'pm'].forEach(function (k) {
         if (!s.shifts[k].suggested) s.shifts[k].suggested = {};
         if (s.shifts[k].photoInfo === undefined) s.shifts[k].photoInfo = null;
+        // v5: 일한 사람은 매번 직접 눌러 고른다 — 저장된 선택은 불러오지 않는다.
+        s.shifts[k].selected = {};
       });
       return s;
     } catch (e) {
@@ -194,7 +196,7 @@
     }
   }
 
-  // 두 시프트의 입력(금액·구간·시간·사진 정보)만 비운다. 명단 선택과
+  // 두 시프트의 입력(금액·구간·시간·사진 정보)과 사람 선택을 비운다.
   // 시프트 기본 시간은 유지한다. 날짜 변경·사진 날짜 이동·입력 지우기가 공용.
   function clearShiftInputs() {
     SHIFT_DEFS.forEach(function (d) {
@@ -203,9 +205,7 @@
       sh.segAmounts = {};
       sh.suggested = {};
       sh.photoInfo = null;
-      Object.keys(sh.selected).forEach(function (id) {
-        sh.selected[id] = { start: '', end: '' };
-      });
+      sh.selected = {};
     });
   }
 
@@ -841,7 +841,7 @@
   });
 
   $('#resetDayBtn').addEventListener('click', function () {
-    if (!window.confirm('오늘 입력한 팁 금액과 일한 시간을 지울까요? (명단과 선택한 사람은 그대로 둬요)')) return;
+    if (!window.confirm('오늘 입력한 팁 금액과 선택한 사람을 지울까요? (명단은 그대로 둬요)')) return;
     clearShiftInputs();
     state.date = todayStr();
     dateInput.value = state.date;
