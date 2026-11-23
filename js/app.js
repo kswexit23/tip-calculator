@@ -125,6 +125,14 @@
       s.rosterVersion = DEFAULT_ROSTER_VERSION;
       // v3 필드 보정 (v2 저장본에는 없음)
       ['am', 'pm'].forEach(function (k) {
+        // v10: 시프트 시간은 계산에 쓰이지 않는 표시 전용 값이라 항상
+        // 기본값으로 강제한다. 초기 버전에서 잘못 저장된 값(예: 오후
+        // 17:00 ~ 17:09)이 버전이 올라가도 계속 따라오는 문제의 수정.
+        // 나중에 가게 설정으로 시프트 시간을 바꿀 수 있게 되면 그때
+        // 저장값을 존중하면 된다 — 지금은 설정 UI가 없어 강제가 맞다.
+        var sdef = SHIFT_DEFS.filter(function (d) { return d.key === k; })[0];
+        s.shifts[k].start = sdef.defStart;
+        s.shifts[k].end = sdef.defEnd;
         if (!s.shifts[k].suggested) s.shifts[k].suggested = {};
         if (s.shifts[k].photoInfo === undefined) s.shifts[k].photoInfo = null;
         // v9: photoRef 보정 (v8 이전 저장본에는 없음)
