@@ -6,6 +6,11 @@
  *       → 판독 데몬(tipcalc-autoread)이 결과를 채우면(done/error) id로 폴링해 수신
  *       → 앱이 팁 총액을 자동 입력하고, 손글씨 이름은 명단과 매칭해 "제안"으로만 표시.
  *
+ * v9: 사진을 잘못 올렸을 때 지울 수 있게 cancelRow(행 취소)·deletePhotoFile
+ * (스토리지 파일 삭제)을 추가하고, pollResult에 취소 콜백을 달았다.
+ * 백엔드 정책은 add-v9-photo-delete.sql (anon update/delete 허용 + status
+ * 'cancelled' 허용) — 없으면 취소 요청은 조용히 실패하고 앱은 그대로 동작한다.
+ *
  * 로그인이 없는 앱이라 공개돼도 되는 anon(publishable) 키만 쓴다 — 데이터 보호는
  * tip_inbox / tip-photos 의 RLS가 담당한다 (add-v3-tip-inbox.sql).
  * 순수 함수(decideShift/matchNames)는 UI 없이 단위 테스트할 수 있게 분리했다.
@@ -84,7 +89,8 @@
     return h;
   }
 
-  // 사진 업로드 + tip_inbox 행 생성. 만든 행 id를 돌려준다.
+  // 사진 업로드 + tip_inbox 행 생성. 만든 행 id와 스토리지 경로를 돌려준다
+  // (v9: 사진 지우기에서 행 취소 + 파일 삭제에 둘 다 필요).
   function uploadAndCreate(file) {
     return prepareImage(file).then(function (prepared) {
       var path = 'uploads/' + Date.now() + '-' +
@@ -105,16 +111,26 @@
         return r.json();
       }).then(function (rows) {
         if (!rows || !rows[0] || !rows[0].id) throw new Error('판독 요청을 만들지 못했어요');
-        return rows[0].id;
+        return { id: rows[0].id, path: path };
       });
     });
   }
 
+  function cancelledError() {
+    var e = new Error('사진을 지웠어요');
+    e.cancelled = true;
+    return e;
+  }
+
   // 행이 done/error가 될 때까지 폴링. onTick(경과 초) 콜백으로 진행 표시를 갱신한다.
-  function pollResult(id, onTick) {
+  // isCancelled(선택): true를 돌려주면 폴링을 멈추고 cancelled 표시가 붙은
+  // 에러로 reject한다 — 사용자가 사진을 지운 뒤 늦게 도착한 결과는 버려진다 (v9).
+  function pollResult(id, onTick, isCancelled) {
     var started = Date.now();
+    function cancelled() { return !!(isCancelled && isCancelled()); }
     return new Promise(function (resolve, reject) {
       (function tick() {
+        if (cancelled()) { reject(cancelledError()); return; }
         var elapsed = Math.floor((Date.now() - started) / 1000);
         if (onTick) onTick(elapsed);
         if (Date.now() - started > POLL_TIMEOUT_MS) {
@@ -127,14 +143,39 @@
           if (!r.ok) throw new Error('판독 결과 조회 실패 (' + r.status + ')');
           return r.json();
         }).then(function (rows) {
+          if (cancelled()) { reject(cancelledError()); return; }
           var row = rows && rows[0];
           if (row && (row.status === 'done' || row.status === 'error')) resolve(row);
           else setTimeout(tick, POLL_INTERVAL_MS);
         }).catch(function () {
+          if (cancelled()) { reject(cancelledError()); return; }
           setTimeout(tick, POLL_INTERVAL_MS); // 일시적 네트워크 오류는 계속 폴링
         });
       })();
     });
+  }
+
+  // ---------- 사진 지우기 (v9): 백엔드 정리 (best-effort) ----------
+  // 행을 status='cancelled'로 바꿔 데몬(status='pending'만 집어감)이 다시
+  // 처리하지 않게 한다. anon UPDATE 정책 + status CHECK 확장은
+  // add-v9-photo-delete.sql이 있어야 실제로 걸린다 — 정책이 아직 없어서
+  // 실패해도(403 등) 앱 동작에는 영향 없게, 결과는 무시하고 항상 resolve한다.
+  function cancelRow(id) {
+    if (!id) return Promise.resolve(false);
+    return fetch(SB_URL + '/rest/v1/' + TABLE + '?id=eq.' + encodeURIComponent(id), {
+      method: 'PATCH',
+      headers: headers({ 'Content-Type': 'application/json', Prefer: 'return=minimal' }),
+      body: JSON.stringify({ status: 'cancelled' }),
+    }).then(function (r) { return r.ok; }).catch(function () { return false; });
+  }
+
+  // 스토리지의 사진 파일 삭제. 위와 같은 best-effort (정책은 add-v9-photo-delete.sql).
+  function deletePhotoFile(path) {
+    if (!path) return Promise.resolve(false);
+    return fetch(SB_URL + '/storage/v1/object/' + BUCKET + '/' + path, {
+      method: 'DELETE',
+      headers: headers(),
+    }).then(function (r) { return r.ok; }).catch(function () { return false; });
   }
 
   window.TipPhoto = {
@@ -143,6 +184,8 @@
     prepareImage: prepareImage,
     uploadAndCreate: uploadAndCreate,
     pollResult: pollResult,
+    cancelRow: cancelRow,
+    deletePhotoFile: deletePhotoFile,
     _config: { SB_URL: SB_URL, BUCKET: BUCKET, TABLE: TABLE },
   };
   if (typeof module !== 'undefined' && module.exports) {

@@ -169,6 +169,10 @@ input[type="date"], input[type="time"], input[type="number"], input[type="text"]
 .photo-btn:disabled { opacity: .55; }
 .photo-status { margin-top: 8px; font-size: 15px; font-weight: 600; color: var(--muted); min-height: 0; }
 .photo-status:empty { margin-top: 0; }
+/* 사진 지우기 (v9) — 인라인 확인 상태에서는 경고 배경으로 바뀐다 */
+.photo-del-row { margin-top: 8px; }
+.photo-del-btn { width: 100%; }
+.photo-del-btn.confirming { background: var(--warn-bg); border-color: var(--warn); font-weight: 700; }
 .photo-info {
   margin-top: 10px; padding: 10px 12px; border-radius: 12px;
   background: var(--accent-soft); font-size: 15px; font-weight: 600;

@@ -14,6 +14,10 @@
  *     'YYYY-MM-DD'를 new Date(str)로 파싱하면 UTC 자정으로 해석돼 UTC-10(HST)
  *     에서 하루 밀리므로 절대 금지. 렌더 테스트에 HST 회귀 검사가 있다.
  *     직원 명단 카드는 index.html에서 페이지 맨 아래로 이동했다.
+ * v9: "사진 지우기" — 잘못 올린 사진을 지운다. 사진이 채운 값(총액·이름 제안·
+ *     참고 정보)만 되돌리고 손으로 고친 값은 그대로 둔다. 판독 중이면 폴링을
+ *     멈추고 늦은 결과는 버리며, 백엔드 행 취소·파일 삭제는 best-effort로 건다
+ *     (정책 SQL은 add-v9-photo-delete.sql, 없어도 UI는 동작).
  * v3: 시프트 카드의 "사진으로 채우기" — 정산지 사진을 올리면 판독 데몬이 읽어서
  *     팁 총액을 자동 입력하고, 손글씨 이름은 명단과 매칭해 "제안" 칩으로만 표시한다
  *     (확정은 사용자가 탭해야 한다). 사진 통신은 js/photo.js (TipPhoto)가 담당.
@@ -64,6 +68,8 @@
       done: false,     // v7: "완료"를 누르면 입력이 접히고 요약만 남는다
       suggested: {},   // 사진 판독이 제안한 사람 {personId: 읽은 이름} — 확정은 사용자가 탭
       photoInfo: null, // 마지막 사진 판독 참고 정보 {purchase, tickets, time, fromOther, unmatched}
+      photoRef: null,  // v9: 지금 붙어 있는 사진 {id, path, totalValue, suggestedIds}
+                       // — 사진 지우기에서 "사진이 채운 값"을 판정하는 근거
     };
   }
   function seedState() {
@@ -121,6 +127,10 @@
       ['am', 'pm'].forEach(function (k) {
         if (!s.shifts[k].suggested) s.shifts[k].suggested = {};
         if (s.shifts[k].photoInfo === undefined) s.shifts[k].photoInfo = null;
+        // v9: photoRef 보정 (v8 이전 저장본에는 없음)
+        var pr = s.shifts[k].photoRef;
+        if (!pr || typeof pr !== 'object' || !pr.id) s.shifts[k].photoRef = null;
+        else if (!Array.isArray(pr.suggestedIds)) pr.suggestedIds = [];
         // v7: 완료(done) 필드 보정 (v6 이전 저장본에는 없음)
         s.shifts[k].done = !!s.shifts[k].done;
         // v5: 일한 사람은 매번 직접 눌러 고른다 — 저장된 선택은 불러오지 않는다.
@@ -229,6 +239,7 @@
       sh.prepays = [];
       sh.suggested = {};
       sh.photoInfo = null;
+      sh.photoRef = null;
       sh.selected = {};
       sh.done = false;
     });
@@ -280,7 +291,13 @@
 
   // ---------- 사진 판독 (v3) ----------
   // 진행 상태는 저장하지 않는 화면 전용 상태 (렌더를 다시 해도 유지되게 렌더 밖에서 관리).
-  var photoUi = { am: { busy: false, msg: '' }, pm: { busy: false, msg: '' } };
+  // v9 필드: active(업로드·폴링 진행 중), cancelled(지우기로 취소됨),
+  // pendingId/pendingPath(진행 중인 행·파일), confirmUntil(지우기 인라인 확인 만료 시각).
+  function freshPhotoUi() {
+    return { busy: false, msg: '', active: false, cancelled: false,
+             pendingId: null, pendingPath: null, confirmUntil: 0, generation: 0 };
+  }
+  var photoUi = { am: freshPhotoUi(), pm: freshPhotoUi() };
 
   function setPhotoStatus(key, msg) {
     photoUi[key].msg = msg;
@@ -295,7 +312,7 @@
   // 손글씨 이름은 선택하지 않고 "제안"으로만 표시한다 (확정은 사용자 탭).
   // v4: 정산지 날짜가 현재 선택 날짜와 다르면 날짜를 그쪽으로 바꾸고 입력을
   // 비운 뒤 채운다 — 다른 날짜의 입력이 섞여 잘못 저장되는 것을 막는다.
-  function applyPhotoResult(fromKey, row) {
+  function applyPhotoResult(fromKey, row, meta) {
     var photoDate = null;
     if (row.settled_time && /^\d{4}-\d{2}-\d{2}/.test(String(row.settled_time))) {
       photoDate = String(row.settled_time).slice(0, 10);
@@ -312,12 +329,22 @@
     inputsDirty = true;
     var targetKey = TipPhoto.decideShift(row.settled_time) || fromKey;
     var shift = state.shifts[targetKey];
+    // v9: 이 자리에 다른 사진이 붙어 있었다면 그 행·파일은 정리한다 (교체).
+    var oldRef = shift.photoRef;
+    if (oldRef && (!meta || oldRef.id !== meta.id)) {
+      TipPhoto.cancelRow(oldRef.id);
+      TipPhoto.deletePhotoFile(oldRef.path);
+    }
     if (row.tip_amount != null) shift.total = String(row.tip_amount);
     var readNames = Array.isArray(row.names) ? row.names : [];
     var m = TipPhoto.matchNames(readNames, state.roster);
     if (!shift.suggested) shift.suggested = {};
+    var addedSuggested = [];
     m.matched.forEach(function (x) {
-      if (!shift.selected[x.personId]) shift.suggested[x.personId] = x.readName;
+      if (!shift.selected[x.personId]) {
+        shift.suggested[x.personId] = x.readName;
+        addedSuggested.push(x.personId);
+      }
     });
     var rawTime = (row.raw && row.raw.time) ||
       (row.settled_time ? String(row.settled_time).slice(11) : '');
@@ -328,12 +355,26 @@
       fromOther: targetKey !== fromKey ? fromKey : null,
       unmatched: m.unmatched,
     };
+    // v9: 사진이 채운 것을 기록한다 — 지울 때 이 기록과 현재 값을 비교해
+    // 사진이 넣은 것만 되돌리고, 사용자가 손으로 고친 값은 건드리지 않는다.
+    shift.photoRef = meta ? {
+      id: meta.id,
+      path: meta.path || null,
+      totalValue: row.tip_amount != null ? String(row.tip_amount) : null,
+      suggestedIds: addedSuggested,
+    } : null;
     save();
     photoUi[targetKey].busy = false;
+    photoUi[targetKey].active = false;
+    photoUi[targetKey].pendingId = null;
+    photoUi[targetKey].pendingPath = null;
     setPhotoStatus(targetKey, '✓ 판독 완료 — 금액과 사람이 맞는지 확인해 주세요.');
     renderShift(targetKey);
     if (targetKey !== fromKey) {
       photoUi[fromKey].busy = false;
+      photoUi[fromKey].active = false;
+      photoUi[fromKey].pendingId = null;
+      photoUi[fromKey].pendingPath = null;
       setPhotoStatus(fromKey, '사진은 ' + (targetKey === 'am' ? '오전' : '오후') +
         ' 시프트에 넣었어요.');
       renderShift(fromKey);
@@ -347,24 +388,141 @@
 
   function handlePhoto(key, file) {
     if (!file || photoUi[key].busy) return;
-    photoUi[key].busy = true;
-    setPhotoStatus(key, '사진을 올리고 있어요…');
-    TipPhoto.uploadAndCreate(file).then(function (id) {
+    var ui = photoUi[key];
+    // 세대(generation) 토큰: 지우거나 새 업로드를 시작하면 이전 비동기 흐름은
+    // stale이 되어 화면 상태를 건드리지 않는다 (늦은 결과로 되살아나는 것 방지).
+    var gen = (ui.generation || 0) + 1;
+    ui.generation = gen;
+    function stale() { return ui.generation !== gen; }
+    ui.busy = true;
+    ui.active = true;
+    ui.cancelled = false;
+    ui.pendingId = null;
+    ui.pendingPath = null;
+    ui.confirmUntil = 0;
+    ui.msg = '사진을 올리고 있어요…';
+    renderShift(key); // 지우기 버튼이 바로 보이게 다시 그린다
+    TipPhoto.uploadAndCreate(file).then(function (up) {
+      if (stale()) {
+        // 그사이 지웠거나 새 사진이 시작됐다 — 이 행은 고아가 되지 않게 취소만 한다.
+        TipPhoto.cancelRow(up.id);
+        TipPhoto.deletePhotoFile(up.path);
+        return null;
+      }
+      ui.pendingId = up.id;
+      ui.pendingPath = up.path;
       setPhotoStatus(key, '판독 중이에요…');
-      return TipPhoto.pollResult(id, function (sec) {
-        setPhotoStatus(key, '판독 중이에요… (' + sec + '초)');
+      return TipPhoto.pollResult(up.id, function (sec) {
+        if (!stale()) setPhotoStatus(key, '판독 중이에요… (' + sec + '초)');
+      }, function () { return ui.cancelled || stale(); }).then(function (row) {
+        return { row: row, meta: up };
       });
-    }).then(function (row) {
+    }).then(function (res) {
+      if (!res || stale()) return; // 지우기로 취소됐거나 옛 세대 흐름
+      var row = res.row;
       if (row.status === 'error') {
-        photoUi[key].busy = false;
+        ui.busy = false;
+        ui.active = false;
+        ui.pendingId = null;
+        ui.pendingPath = null;
         setPhotoStatus(key, '⚠ ' + (row.error || '판독에 실패했어요. 사진을 다시 찍어주세요.'));
+        renderShift(key);
         return;
       }
-      applyPhotoResult(key, row);
+      applyPhotoResult(key, row, res.meta);
     }).catch(function (e) {
-      photoUi[key].busy = false;
+      if (stale()) return;
+      ui.busy = false;
+      ui.active = false;
+      ui.pendingId = null;
+      ui.pendingPath = null;
+      if (e && e.cancelled) {
+        // 사진 지우기로 멈춘 폴링 — 지우기 쪽이 이미 안내를 띄웠다.
+        renderShift(key);
+        return;
+      }
       setPhotoStatus(key, '⚠ ' + (e && e.message ? e.message : '사진을 처리하지 못했어요.'));
+      renderShift(key);
     });
+  }
+
+  // ---------- 사진 지우기 (v9) ----------
+  // 확인은 가장 가볍게: 버튼을 한 번 누르면 "정말 지울까요?" 문구로 바뀌고,
+  // 3초 안에 한 번 더 누르면 지워진다 (모달 없음 — 매일 쓰는 도구라 빠르게).
+  var PHOTO_DEL_LABEL = '사진 지우기';
+  var PHOTO_DEL_CONFIRM_LABEL = '정말 지울까요? 한 번 더 누르면 지워져요';
+
+  function armPhotoDeleteConfirm(key, btn) {
+    photoUi[key].confirmUntil = Date.now() + 3000;
+    btn.textContent = PHOTO_DEL_CONFIRM_LABEL;
+    btn.classList.add('confirming');
+    setTimeout(function () {
+      if (photoUi[key].confirmUntil &&
+          photoUi[key].confirmUntil <= Date.now()) {
+        photoUi[key].confirmUntil = 0;
+        var section = document.getElementById('shift-' + key);
+        var b = section ? section.querySelector('[data-photo-del-btn]') : null;
+        if (b) {
+          b.textContent = PHOTO_DEL_LABEL;
+          b.classList.remove('confirming');
+        }
+      }
+    }, 3100);
+  }
+
+  function onPhotoDeleteClick(key, btn) {
+    if (photoUi[key].confirmUntil > Date.now()) {
+      photoUi[key].confirmUntil = 0;
+      executePhotoDelete(key);
+    } else {
+      armPhotoDeleteConfirm(key, btn);
+    }
+  }
+
+  function executePhotoDelete(key) {
+    var ui = photoUi[key];
+    var shift = state.shifts[key];
+    if (ui.active) {
+      // 판독 중인 사진: 세대를 올려 폴링 흐름을 stale로 만든다 — 늦게 도착하는
+      // 판독 결과는 버려지고, 이미 만들어진 행이 있으면 취소까지 건다.
+      // (업로드 자체가 아직 안 끝났으면, 끝나는 순간 그 흐름이 stale을 보고
+      // 행·파일을 스스로 취소한다.)
+      ui.generation = (ui.generation || 0) + 1;
+      ui.cancelled = true;
+      ui.busy = false;
+      ui.active = false;
+      if (ui.pendingId) {
+        TipPhoto.cancelRow(ui.pendingId);
+        TipPhoto.deletePhotoFile(ui.pendingPath);
+        ui.pendingId = null;
+        ui.pendingPath = null;
+      }
+      ui.msg = '사진을 지웠어요. 다시 올릴 수 있어요.';
+      save();
+      renderShift(key);
+      renderResults();
+      return;
+    }
+    var ref = shift.photoRef;
+    if (!ref) return;
+    // 사진이 채운 것만 되돌린다: 총액은 사진이 넣은 값과 지금 값이 같을 때만
+    // 비우고, 이름 제안은 이 사진이 제안한 것만 지운다. 사용자가 탭해서 확정한
+    // 선택이나 손으로 고친 금액은 건드리지 않는다.
+    if (ref.totalValue != null && shift.total === ref.totalValue) {
+      shift.total = '';
+    }
+    (ref.suggestedIds || []).forEach(function (id) {
+      if (shift.suggested) delete shift.suggested[id];
+    });
+    shift.photoInfo = null;
+    shift.photoRef = null;
+    TipPhoto.cancelRow(ref.id);
+    TipPhoto.deletePhotoFile(ref.path);
+    inputsDirty = true; // 총액이 비워졌으면 그날 기록도 다시 맞춘다
+    ui.msg = '사진을 지웠어요. 다시 올릴 수 있어요.';
+    save();
+    renderShift(key);
+    renderResults();
   }
 
   // ---------- 명단 렌더 ----------
@@ -521,6 +679,16 @@
       photoInfoHtml += '</div>';
     }
 
+    // 사진 지우기 버튼 (v9): 판독 중이거나 사진이 붙어 있을 때만 보인다.
+    var photoDelHtml = '';
+    if (photoUi[key].active || shift.photoRef) {
+      var confirming = photoUi[key].confirmUntil > Date.now();
+      photoDelHtml = '<div class="photo-del-row">' +
+        '<button type="button" class="btn btn-danger photo-del-btn' +
+        (confirming ? ' confirming' : '') + '" data-photo-del-btn>' +
+        (confirming ? PHOTO_DEL_CONFIRM_LABEL : PHOTO_DEL_LABEL) + '</button></div>';
+    }
+
     // 카드 내부 순서 (v6): 일한 사람 칩 → 사진으로 채우기 → 팁 총액 → 선지급 옵션.
     // 사람이 먼저 선택돼 있어도 사진 판독 제안은 기존 방식 그대로 동작한다.
     section.innerHTML =
@@ -535,6 +703,7 @@
       '</div>' +
       '<div class="photo-status" data-photo-status>' + esc(photoUi[key].msg) + '</div>' +
       photoInfoHtml +
+      photoDelHtml +
       '<div class="total-row"><label for="total-' + key + '">팁 총액</label>' +
       '<div class="money-wrap"><span class="dollar">$</span>' +
       '<input type="number" class="money-input" id="total-' + key + '" inputmode="decimal" min="0" step="0.01" ' +
@@ -605,6 +774,14 @@
         var file = photoInput.files && photoInput.files[0];
         photoInput.value = ''; // 같은 파일을 다시 골라도 change가 발생하게
         handlePhoto(key, file);
+      });
+    }
+
+    // v9: 사진 지우기 (인라인 확인 — 한 번 누르면 확인 문구, 한 번 더 누르면 삭제)
+    var photoDelBtn = $('[data-photo-del-btn]', section);
+    if (photoDelBtn) {
+      photoDelBtn.addEventListener('click', function () {
+        onPhotoDeleteClick(key, photoDelBtn);
       });
     }
 
