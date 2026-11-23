@@ -1,8 +1,11 @@
 'use strict';
 /*
- * 팁톡(TipTalk) UI (v4)
- * 기본 흐름: 팁 총액 입력 → 일한 사람 칩 선택 → 결과 확인 (3단계)
- * 시간·구간 입력은 접힌 고급 옵션 안에 있다.
+ * 팁톡(TipTalk) UI (v6)
+ * 기본 흐름: 일한 사람 칩 선택 → 팁 총액 입력(또는 사진) → 결과 확인
+ * v6: 시간/구간 방식 폐기 → "선지급" 방식. 접힌 옵션에서 먼저 온 사람에게
+ *     먼저 떼어줄 금액을 지정하면, 총액에서 그만큼을 먼저 주고 → 남은 금액의
+ *     주방 10% → 나머지를 서버 전원이 균등 분배한다 (calc.js 참고).
+ *     카드 내부 순서도 칩 → 사진 → 총액 → 선지급 옵션으로 재배열.
  * v3: 시프트 카드의 "사진으로 채우기" — 정산지 사진을 올리면 판독 데몬이 읽어서
  *     팁 총액을 자동 입력하고, 손글씨 이름은 명단과 매칭해 "제안" 칩으로만 표시한다
  *     (확정은 사용자가 탭해야 한다). 사진 통신은 js/photo.js (TipPhoto)가 담당.
@@ -47,11 +50,9 @@
   function uid() {
     return 'p' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
   }
-  function freshShift(start, end, selectedIds) {
-    var sel = {};
-    (selectedIds || []).forEach(function (id) { sel[id] = { start: '', end: '' }; });
+  function freshShift(start, end) {
     return {
-      total: '', start: start, end: end, selected: sel, segAmounts: {}, advancedOpen: false,
+      total: '', start: start, end: end, selected: {}, prepays: [], advancedOpen: false,
       suggested: {},   // 사진 판독이 제안한 사람 {personId: 읽은 이름} — 확정은 사용자가 탭
       photoInfo: null, // 마지막 사진 판독 참고 정보 {purchase, tickets, time, fromOther, unmatched}
     };
@@ -113,6 +114,14 @@
         if (s.shifts[k].photoInfo === undefined) s.shifts[k].photoInfo = null;
         // v5: 일한 사람은 매번 직접 눌러 고른다 — 저장된 선택은 불러오지 않는다.
         s.shifts[k].selected = {};
+        // v6: 시간/구간 방식 폐기 — segAmounts는 버리고 prepays로 정규화한다.
+        delete s.shifts[k].segAmounts;
+        if (!Array.isArray(s.shifts[k].prepays)) s.shifts[k].prepays = [];
+        s.shifts[k].prepays = s.shifts[k].prepays.filter(function (p) {
+          return p && typeof p.personId === 'string';
+        }).map(function (p) {
+          return { personId: p.personId, amount: p.amount == null ? '' : String(p.amount) };
+        });
       });
       return s;
     } catch (e) {
@@ -166,7 +175,7 @@
   // 계산 결과를 현재 선택 날짜의 기록으로 반영한다.
   // - 총액 0 → 그 날짜 기록 삭제 (사용자가 입력을 비운 경우)
   // - 합계 검증 OK → 인당 합계로 저장 (이름 기준, 주방 포함 전 인원)
-  // - 구간 미입력 등 미완성 상태 → 기존 기록을 건드리지 않는다
+  // - 선지급 검증 오류 등 미완성 상태 → 기존 기록을 건드리지 않는다
   function syncHistory(day) {
     if (!inputsDirty) return;
     var date = state.date;
@@ -196,13 +205,13 @@
     }
   }
 
-  // 두 시프트의 입력(금액·구간·시간·사진 정보)과 사람 선택을 비운다.
+  // 두 시프트의 입력(금액·선지급·사진 정보)과 사람 선택을 비운다.
   // 시프트 기본 시간은 유지한다. 날짜 변경·사진 날짜 이동·입력 지우기가 공용.
   function clearShiftInputs() {
     SHIFT_DEFS.forEach(function (d) {
       var sh = state.shifts[d.key];
       sh.total = '';
-      sh.segAmounts = {};
+      sh.prepays = [];
       sh.suggested = {};
       sh.photoInfo = null;
       sh.selected = {};
@@ -228,43 +237,29 @@
     var v = Math.abs(cents) / 100;
     return sign + '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
-  function minLabel(m) {
-    return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
-  }
-  function segKey(s) { return s.startMin + '-' + s.endMin; }
-
   // ---------- 계산 연결 ----------
   function computeForShift(shift) {
     var kitchenIds = [];
-    var workers = [];
+    var serverIds = [];
     Object.keys(shift.selected).forEach(function (id) {
       var p = personById(id);
       if (!p) return;
-      if (p.role === 'kitchen') {
-        kitchenIds.push(id);
-      } else {
-        workers.push({
-          id: id,
-          startMin: TipCalc.timeToMin(shift.selected[id].start),
-          endMin: TipCalc.timeToMin(shift.selected[id].end),
-        });
-      }
+      if (p.role === 'kitchen') kitchenIds.push(id);
+      else serverIds.push(id);
     });
-    var segs = TipCalc.buildSegments(
-      TipCalc.timeToMin(shift.start), TipCalc.timeToMin(shift.end), workers);
-    var segInputs = segs.map(function (s) {
-      var saved = shift.segAmounts[segKey(s)];
-      return {
-        startMin: s.startMin, endMin: s.endMin, memberIds: s.memberIds,
-        amountCents: saved != null && saved !== '' ? TipCalc.toCents(saved) : null,
-      };
+    // 선지급은 그 시프트에서 선택된 사람의 것만 계산에 넣는다.
+    var prepays = (shift.prepays || []).filter(function (p) {
+      return !!shift.selected[p.personId];
+    }).map(function (p) {
+      return { personId: p.personId, amountCents: TipCalc.toCents(p.amount) };
     });
     var result = TipCalc.computeShift({
       totalCents: TipCalc.toCents(shift.total),
       kitchenIds: kitchenIds,
-      segments: segInputs,
+      serverIds: serverIds,
+      prepays: prepays,
     });
-    return { result: result, segments: result.segments };
+    return { result: result };
   }
 
   // ---------- 사진 판독 (v3) ----------
@@ -382,7 +377,6 @@
     var section = $('#shift-' + key);
     var computed = computeForShift(shift);
     var result = computed.result;
-    var segs = computed.segments;
 
     var chipsHtml = state.roster.map(function (p) {
       var on = !!shift.selected[p.id];
@@ -401,70 +395,42 @@
     }).map(function (id) { return personById(id).name; });
     var kitchenHtml = '';
     if (kitchenNames.length > 0) {
+      var kitchenBasis = result.prepayTotalCents > 0 ? '먼저 떼어준 금액을 뺀 남은 금액' : '팁 전체';
       kitchenHtml = '<p class="kitchen-note">🍳 주방 ' + esc(kitchenNames.join(', ')) +
-        ' — 팁 전체의 10%인 <span data-kitchen-amount>' + fmt(result.kitchenTotalCents) +
-        '</span>를 먼저 나눠 가져요.</p>';
+        ' — ' + kitchenBasis + '의 10%인 <span data-kitchen-amount>' + fmt(result.kitchenTotalCents) +
+        '</span>를 나눠 가져요.</p>';
     }
 
+    // 선지급 섹션 (v6): 먼저 온 사람에게 먼저 떼어줄 금액 지정.
+    // 행은 shift.prepays의 실제 인덱스를 들고 다니고, 선택된 사람의 행만 보여준다.
     var advHtml = '';
     if (shift.advancedOpen) {
       advHtml += '<div class="advanced">';
-      // 시프트 시간
-      advHtml += '<div class="adv-block"><p class="adv-title">시프트 시간</p>' +
-        '<div class="time-row">' +
-          '<input type="time" data-shift-time="start" value="' + esc(shift.start) + '">' +
-          '<span class="tilde">~</span>' +
-          '<input type="time" data-shift-time="end" value="' + esc(shift.end) + '">' +
-        '</div></div>';
-      // 사람별 시간 (서버만)
-      var selServers = Object.keys(shift.selected).filter(function (id) {
-        var p = personById(id); return p && p.role === 'server';
-      });
-      if (selServers.length > 0) {
-        advHtml += '<div class="adv-block"><p class="adv-title">사람별 일한 시간</p><div class="time-grid">';
-        selServers.forEach(function (id) {
-          var p = personById(id);
-          var t = shift.selected[id];
-          advHtml += '<div class="time-row">' +
-            '<span class="who">' + esc(p.name) + '</span>' +
-            '<input type="time" data-person-time="start" data-person-id="' + id + '" value="' + esc(t.start) + '">' +
-            '<span class="tilde">~</span>' +
-            '<input type="time" data-person-time="end" data-person-id="' + id + '" value="' + esc(t.end) + '">' +
+      advHtml += '<div class="adv-block"><p class="adv-title">먼저 떼어주기</p>';
+      var selPeople = state.roster.filter(function (p) { return !!shift.selected[p.id]; });
+      if (selPeople.length === 0) {
+        advHtml += '<p class="hint">먼저 위에서 일한 사람을 선택해 주세요.</p>';
+      } else {
+        (shift.prepays || []).forEach(function (pp, idx) {
+          if (!shift.selected[pp.personId]) return; // 선택 해제된 사람의 행은 숨김 (값은 유지)
+          var opts = selPeople.map(function (p) {
+            return '<option value="' + p.id + '"' +
+              (p.id === pp.personId ? ' selected' : '') + '>' + esc(p.name) + '</option>';
+          }).join('');
+          advHtml += '<div class="prepay-row">' +
+            '<select data-prepay-person="' + idx + '" aria-label="먼저 떼어줄 사람">' + opts + '</select>' +
+            '<div class="money-wrap"><span class="dollar">$</span>' +
+            '<input type="number" class="money-input prepay-input" inputmode="decimal" min="0" step="0.01" ' +
+            'placeholder="0.00" data-prepay-amount="' + idx + '" value="' + esc(String(pp.amount)) + '"></div>' +
+            '<button type="button" class="btn btn-small btn-danger" data-prepay-del="' + idx + '">삭제</button>' +
           '</div>';
         });
-        advHtml += '</div><p class="hint">시간을 비워두면 시프트 전체를 일한 것으로 봐요. 하루 종일 같이 일했으면 안 넣어도 돼요.</p></div>';
+        advHtml += '<button type="button" class="btn prepay-add" data-prepay-add>+ 먼저 떼어주기 추가</button>';
+        advHtml += '<p class="hint">먼저 온 사람이 혼자 일한 몫을 영수증에서 보고 먼저 떼어줘요. ' +
+          '남은 금액에서 주방 10%를 떼고, 나머지는 일한 서버가 똑같이 나눠요. ' +
+          '먼저 떼어준 사람도 똑같이 나누는 데는 그대로 참여해요.</p>';
       }
-      if (kitchenNames.length > 0) {
-        advHtml += '<p class="hint">주방은 시간과 상관없이 전체 팁의 10%예요.</p>';
-      }
-      // 구간별 팁
-      if (segs.length > 1) {
-        advHtml += '<div class="adv-block"><p class="adv-title">구간별 팁 금액</p>' +
-          '<p class="hint">시간대가 나뉘었어요. 각 구간의 실제 팁 합계를 체크(영수증)를 보고 넣어주세요. 마지막 구간은 나머지로 자동 계산돼요.</p>';
-        segs.forEach(function (s) {
-          var who = s.memberIds.map(function (id) {
-            var p = personById(id); return p ? p.name : '?';
-          }).join(', ');
-          advHtml += '<div class="seg-row"><div class="seg-info">' +
-            '<div class="seg-when">' + minLabel(s.startMin) + ' ~ ' + minLabel(s.endMin) + '</div>' +
-            '<div class="seg-who">' + esc(who) + '</div></div>';
-          if (s.auto) {
-            advHtml += '<div><div class="seg-auto-label">나머지 자동</div>' +
-              '<div class="seg-auto" data-auto-amount>' + fmt(s.amountCents) + '</div></div>';
-          } else {
-            var savedVal = shift.segAmounts[segKey(s)];
-            advHtml += '<div class="money-wrap"><span class="dollar">$</span>' +
-              '<input type="number" class="money-input" inputmode="decimal" min="0" step="0.01" ' +
-              'placeholder="0.00" data-seg-input="' + segKey(s) + '" value="' +
-              (savedVal == null ? '' : esc(String(savedVal))) + '"></div>';
-          }
-          advHtml += '</div>';
-        });
-        advHtml += '</div>';
-      } else if (segs.length === 1) {
-        advHtml += '<p class="hint">지금은 구간이 하나예요. 같은 시간에 같이 일했으면 이대로 두면 돼요.</p>';
-      }
-      advHtml += '</div>';
+      advHtml += '</div></div>';
     }
 
     var photoInfoHtml = '';
@@ -488,14 +454,13 @@
       photoInfoHtml += '</div>';
     }
 
-    var needSegInput = result.incomplete && segs.length > 1;
+    // 카드 내부 순서 (v6): 일한 사람 칩 → 사진으로 채우기 → 팁 총액 → 선지급 옵션.
+    // 사람이 먼저 선택돼 있어도 사진 판독 제안은 기존 방식 그대로 동작한다.
     section.innerHTML =
       '<div class="shift-head"><h2>' + def.title + '</h2>' +
       '<span class="shift-time-label">' + esc(shift.start) + ' ~ ' + esc(shift.end) + '</span></div>' +
-      '<div class="total-row"><label for="total-' + key + '">팁 총액</label>' +
-      '<div class="money-wrap"><span class="dollar">$</span>' +
-      '<input type="number" class="money-input" id="total-' + key + '" inputmode="decimal" min="0" step="0.01" ' +
-      'placeholder="0.00" data-total-input value="' + esc(String(shift.total)) + '"></div></div>' +
+      '<p class="chips-label">일한 사람 (눌러서 선택)</p>' +
+      '<div class="chips">' + chipsHtml + '</div>' +
       '<div class="photo-row">' +
       '<button type="button" class="btn photo-btn" data-photo-btn' +
         (photoUi[key].busy ? ' disabled' : '') + '>📷 사진으로 채우기</button>' +
@@ -503,12 +468,13 @@
       '</div>' +
       '<div class="photo-status" data-photo-status>' + esc(photoUi[key].msg) + '</div>' +
       photoInfoHtml +
-      '<p class="chips-label">일한 사람 (눌러서 선택)</p>' +
-      '<div class="chips">' + chipsHtml + '</div>' +
+      '<div class="total-row"><label for="total-' + key + '">팁 총액</label>' +
+      '<div class="money-wrap"><span class="dollar">$</span>' +
+      '<input type="number" class="money-input" id="total-' + key + '" inputmode="decimal" min="0" step="0.01" ' +
+      'placeholder="0.00" data-total-input value="' + esc(String(shift.total)) + '"></div></div>' +
       kitchenHtml +
       '<button type="button" class="btn advanced-toggle" data-advanced-toggle>' +
-        (shift.advancedOpen ? '시간 나누기 닫기' : '일한 시간이 서로 다르면 눌러주세요') +
-        (needSegInput ? ' · 구간 팁 입력 필요' : '') +
+        (shift.advancedOpen ? '먼저 떼어주기 닫기' : '먼저 온 사람에게 먼저 떼어줄 금액이 있으면 눌러주세요') +
       '</button>' +
       advHtml +
       '<div class="shift-warnings" data-warnings></div>';
@@ -528,10 +494,6 @@
     }
     var kAmt = $('[data-kitchen-amount]', section);
     if (kAmt) kAmt.textContent = fmt(result.kitchenTotalCents);
-    var auto = $('[data-auto-amount]', section);
-    if (auto && result.segments.length > 1) {
-      auto.textContent = fmt(result.segments[result.segments.length - 1].amountCents);
-    }
   }
 
   function attachShiftListeners(key, section) {
@@ -551,7 +513,7 @@
         var id = btn.getAttribute('data-chip');
         inputsDirty = true;
         if (shift.selected[id]) delete shift.selected[id];
-        else shift.selected[id] = { start: '', end: '' };
+        else shift.selected[id] = {};
         // 사진 판독 제안은 탭하는 순간 확정/해제되므로 제안 표시를 지운다.
         if (shift.suggested) delete shift.suggested[id];
         save();
@@ -578,36 +540,51 @@
       renderShift(key);
     });
 
-    section.querySelectorAll('[data-shift-time]').forEach(function (inp) {
-      inp.addEventListener('change', function () {
-        shift[inp.getAttribute('data-shift-time')] = inp.value;
+    // 선지급 행: 사람 변경 / 금액 입력 / 삭제 / 추가
+    section.querySelectorAll('[data-prepay-person]').forEach(function (sel) {
+      sel.addEventListener('change', function () {
+        var row = shift.prepays[+sel.getAttribute('data-prepay-person')];
+        if (!row) return;
+        row.personId = sel.value;
         inputsDirty = true;
         save();
         renderShift(key);
         renderResults();
       });
     });
-    section.querySelectorAll('[data-person-time]').forEach(function (inp) {
-      inp.addEventListener('change', function () {
-        var id = inp.getAttribute('data-person-id');
-        if (shift.selected[id]) {
-          shift.selected[id][inp.getAttribute('data-person-time')] = inp.value;
-          inputsDirty = true;
-          save();
-          renderShift(key);
-          renderResults();
-        }
-      });
-    });
-    section.querySelectorAll('[data-seg-input]').forEach(function (inp) {
+    section.querySelectorAll('[data-prepay-amount]').forEach(function (inp) {
       inp.addEventListener('input', function () {
-        shift.segAmounts[inp.getAttribute('data-seg-input')] = inp.value;
+        var row = shift.prepays[+inp.getAttribute('data-prepay-amount')];
+        if (!row) return;
+        row.amount = inp.value;
         inputsDirty = true;
         save();
         updateShiftWarnings(key, section);
         renderResults();
       });
     });
+    section.querySelectorAll('[data-prepay-del]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        shift.prepays.splice(+btn.getAttribute('data-prepay-del'), 1);
+        inputsDirty = true;
+        save();
+        renderShift(key);
+        renderResults();
+      });
+    });
+    var addBtn = $('[data-prepay-add]', section);
+    if (addBtn) {
+      addBtn.addEventListener('click', function () {
+        var first = state.roster.filter(function (p) { return !!shift.selected[p.id]; })[0];
+        if (!first) return;
+        if (!Array.isArray(shift.prepays)) shift.prepays = [];
+        shift.prepays.push({ personId: first.id, amount: '' });
+        inputsDirty = true;
+        save();
+        renderShift(key);
+        renderResults();
+      });
+    }
   }
 
   // ---------- 결과 렌더 ----------
@@ -628,18 +605,18 @@
         state.shifts.am.selected[p.id] || state.shifts.pm.selected[p.id];
     });
     var html = '<table class="result"><thead><tr>' +
-      '<th>이름</th><th>오전</th><th>오후</th><th>합계</th></tr></thead><tbody>';
+      '<th>이름</th><th class="col-am">오전</th><th class="col-pm">오후</th><th>합계</th></tr></thead><tbody>';
     rows.forEach(function (p) {
       // 총액이 0인 시프트는 나눈 금액이 없으므로 '–'로 표시
       var amVal = amRes.totalCents === 0 ? null : amRes.perPerson[p.id];
       var pmVal = pmRes.totalCents === 0 ? null : pmRes.perPerson[p.id];
       html += '<tr><td class="p-name">' + esc(p.name) +
         (p.role === 'kitchen' ? ' <span class="role-badge kitchen">주방</span>' : '') + '</td>' +
-        '<td>' + fmt(amVal) + '</td>' +
-        '<td>' + fmt(pmVal) + '</td>' +
+        '<td class="col-am">' + fmt(amVal) + '</td>' +
+        '<td class="col-pm">' + fmt(pmVal) + '</td>' +
         '<td class="p-total">' + fmt(day.perPerson[p.id]) + '</td></tr>';
     });
-    html += '</tbody><tfoot><tr><td>전체</td><td>' + fmt(amRes.totalCents) + '</td><td>' +
+    html += '</tbody><tfoot><tr><td>전체</td><td class="col-am">' + fmt(amRes.totalCents) + '</td><td class="col-pm">' +
       fmt(pmRes.totalCents) + '</td><td>' + fmt(day.totalCents) + '</td></tr></tfoot></table>';
 
     if (day.balanced) {
