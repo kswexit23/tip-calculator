@@ -18,6 +18,14 @@
  *     참고 정보)만 되돌리고 손으로 고친 값은 그대로 둔다. 판독 중이면 폴링을
  *     멈추고 늦은 결과는 버리며, 백엔드 행 취소·파일 삭제는 best-effort로 건다
  *     (정책 SQL은 add-v9-photo-delete.sql, 없어도 UI는 동작).
+ * v12: 완료 버튼 위 안내 — 총액이 없어서 완료 버튼이 비활성인 경우 버튼 바로
+ *     위에 "팁 총액을 입력하면 완료할 수 있어요"를 표시한다. 총액 미입력
+ *     상태에서는 "선지급 합계 >= 총액" 경고를 표시에서 빼 안내와 겹치지
+ *     않게 한다 (계산·경고 생성은 그대로). 선지급 행에는 삭제 옆에
+ *     확인/수정 버튼이 생겼다: 확인하면 그 행의 이름·금액 입력이 잠기고
+ *     수정으로 풀 수 있다. 잠금은 세션 내 UI 상태일 뿐 계산·done 저장과
+ *     무관하고, 새로고침하면 풀린다 (loadState 정규화가 행을
+ *     {personId, amount}로 재구성하기 때문).
  * v11: 날짜 정정 — 입력(팁 금액)이 있는 상태에서 상단 날짜 칸을 바꾸면 입력이
  *     지워지지 않고 새 날짜로 따라가며, 옛 날짜에 저장된 이 입력의 기록도
  *     새 날짜로 옮겨진다. 새 날짜에 다른 기록이 있으면 인라인 확인 바에서
@@ -407,6 +415,17 @@
     return { result: result };
   }
 
+  // v12: 표시용 경고 필터. 총액이 아직 없는(0/빈칸) 시프트에서는
+  // "선지급 합계가 팁 총액과 같거나 많아요" 경고가 총액을 넣기도 전에 떠서
+  // "금액이 틀렸다"는 오해를 부른다. 그 상태에서는 완료 버튼 위 안내 문구가
+  // 우선이므로 이 경고만 표시에서 뺀다 (calc.js의 계산·경고 생성은 그대로).
+  function visibleWarnings(result) {
+    if (result.totalCents > 0) return result.warnings;
+    return result.warnings.filter(function (w) {
+      return w.indexOf('합계가 팁 총액과 같거나') === -1;
+    });
+  }
+
   // ---------- 사진 판독 (v3) ----------
   // 진행 상태는 저장하지 않는 화면 전용 상태 (렌더를 다시 해도 유지되게 렌더 밖에서 관리).
   // v9 필드: active(업로드·폴링 진행 중), cancelled(지우기로 취소됨),
@@ -780,11 +799,19 @@
             return '<option value="' + p.id + '"' +
               (p.id === pp.personId ? ' selected' : '') + '>' + esc(p.name) + '</option>';
           }).join('');
-          advHtml += '<div class="prepay-row">' +
-            '<select data-prepay-person="' + idx + '" aria-label="먼저 떼어줄 사람">' + opts + '</select>' +
+          // v12: 행별 확인/수정 잠금. locked는 세션 내 UI 상태일 뿐이라
+          // loadState 정규화({personId, amount}로 재구성)에서 버려진다 —
+          // 새로고침하면 잠금은 풀리고 편집 상태로 시작한다.
+          var locked = !!pp.locked;
+          advHtml += '<div class="prepay-row' + (locked ? ' locked' : '') + '">' +
+            '<select data-prepay-person="' + idx + '" aria-label="먼저 떼어줄 사람"' +
+              (locked ? ' disabled' : '') + '>' + opts + '</select>' +
             '<div class="money-wrap"><span class="dollar">$</span>' +
             '<input type="number" class="money-input prepay-input" inputmode="decimal" min="0" step="0.01" ' +
-            'placeholder="0.00" data-prepay-amount="' + idx + '" value="' + esc(String(pp.amount)) + '"></div>' +
+            'placeholder="0.00" data-prepay-amount="' + idx + '" value="' + esc(String(pp.amount)) + '"' +
+              (locked ? ' disabled' : '') + '></div>' +
+            '<button type="button" class="btn btn-small prepay-lock-btn" data-prepay-lock="' + idx + '">' +
+              (locked ? '수정' : '확인') + '</button>' +
             '<button type="button" class="btn btn-small btn-danger" data-prepay-del="' + idx + '">삭제</button>' +
           '</div>';
         });
@@ -862,6 +889,8 @@
       '</button>' +
       advHtml +
       '<div class="shift-warnings" data-warnings></div>' +
+      // v12: 완료 버튼이 꺼져 있는 이유 안내 (updateShiftWarnings가 채운다)
+      '<div class="done-hint" data-done-hint></div>' +
       '<button type="button" class="btn btn-primary complete-btn" data-done-btn' +
         (TipCalc.toCents(shift.total) > 0 && result.balanced ? '' : ' disabled') +
         '>완료</button>';
@@ -875,7 +904,7 @@
     var result = computeForShift(shift).result;
     var box = $('[data-warnings]', section);
     if (box) {
-      box.innerHTML = result.warnings.map(function (w) {
+      box.innerHTML = visibleWarnings(result).map(function (w) {
         return '<div class="warning">⚠ ' + esc(w) + '</div>';
       }).join('');
     }
@@ -885,6 +914,13 @@
     var doneBtn = $('[data-done-btn]', section);
     if (doneBtn) {
       doneBtn.disabled = !(TipCalc.toCents(shift.total) > 0 && result.balanced);
+    }
+    // v12: 버튼이 꺼진 이유가 "총액 미입력"이면 버튼 바로 위에 안내를 보여준다.
+    // (그 외 사유 — 선지급 초과·서버 미선택 등 — 는 경고 박스가 이미 설명한다.)
+    var hint = $('[data-done-hint]', section);
+    if (hint) {
+      hint.textContent = (doneBtn && doneBtn.disabled && TipCalc.toCents(shift.total) <= 0)
+        ? '팁 총액을 입력하면 완료할 수 있어요' : '';
     }
   }
 
@@ -972,6 +1008,19 @@
         renderResults();
       });
     });
+    // v12: 선지급 행 확인/수정 잠금 토글. 잠금은 순수 UI 상태라 계산에는
+    // 영향이 없고(잠겨 있어도 현재 값으로 실시간 계산), 삭제는 잠긴
+    // 상태에서도 그대로 된다. done(완료) 상태와도 무관하다.
+    section.querySelectorAll('[data-prepay-lock]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var row = shift.prepays[+btn.getAttribute('data-prepay-lock')];
+        if (!row) return;
+        row.locked = !row.locked;
+        save();
+        renderShift(key);
+        renderResults();
+      });
+    });
     var addBtn = $('[data-prepay-add]', section);
     if (addBtn) {
       addBtn.addEventListener('click', function () {
@@ -1041,8 +1090,8 @@
     }
 
     var warns = [];
-    amRes.warnings.forEach(function (w) { warns.push('오전: ' + w); });
-    pmRes.warnings.forEach(function (w) { warns.push('오후: ' + w); });
+    visibleWarnings(amRes).forEach(function (w) { warns.push('오전: ' + w); });
+    visibleWarnings(pmRes).forEach(function (w) { warns.push('오후: ' + w); });
     if (warns.length > 0) {
       html += '<div class="result-warnings">' + warns.map(function (w) {
         return '<div class="warning">⚠ ' + esc(w) + '</div>';

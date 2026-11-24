@@ -247,6 +247,17 @@ table.result tfoot td { font-weight: 700; border-bottom: none; }
 /* 완료 접힘 (v7) */
 .btn:disabled { opacity: .55; cursor: default; }
 .complete-btn { width: 100%; margin-top: 14px; }
+/* v12: 완료 버튼이 꺼져 있는 이유 안내 (총액 미입력일 때만 텍스트가 들어감) */
+.done-hint {
+  margin-top: 12px; text-align: center;
+  color: var(--muted); font-size: 15px; font-weight: 600;
+}
+.done-hint:empty { display: none; }
+/* v12: 선지급 행 잠금 — 잠긴 행은 입력이 비활성임이 눈에 보이게 */
+.prepay-row.locked select, .prepay-row.locked .prepay-input {
+  opacity: .55; background: var(--chip);
+}
+.prepay-row .prepay-lock-btn { flex-shrink: 0; }
 .edit-btn { width: 100%; margin-top: 12px; }
 .done-box { margin-top: 14px; }
 .done-title { font-size: 19px; font-weight: 800; color: var(--ok); margin: 0 0 6px; }
