@@ -4,14 +4,18 @@
  * 금액은 전부 센트(정수)로 계산해서 반올림 오차를 없앤다.
  *
  * 규칙 (2026-11-22 사용자 확정, v6에서 시간/구간 방식 폐기 → 선지급 방식,
- *       v7에서 계산 순서 정정 — 주방 10%는 선지급에서도 먼저 간다):
+ *       v7에서 계산 순서 정정 — 주방 10%는 선지급에서도 먼저 간다,
+ *       v13에서 주방 몫 달러 단위 버림 추가 — 2026-11-24 사용자 지시):
  * 시프트별 계산 순서:
  * 1. (선택) 선지급: 지정한 사람에게 지정한 금액을 먼저 떼어주되, 주방이 있으면
  *    그 금액의 10%는 주방 몫으로 가고 받는 사람은 90%를 가진다.
  *    여러 명 지정 가능. 선지급 합계가 총액 이상이면 검증 오류.
  * 2. 나머지(총액 − 선지급 합계)에서도 주방 몫 KITCHEN_RATE(10%)를 뗀다
- *    (주방이 선택된 경우만). 즉 주방 총액은 언제나 팁 전체의 10%와 같고,
- *    여럿이면 균등 분배한다. 주방이 없으면 10% 단계 자체가 없다.
+ *    (주방이 선택된 경우만). 즉 주방 풀은 언제나 팁 전체의 10%와 같다.
+ *    주방이 없으면 10% 단계 자체가 없다.
+ * 2-1. (v13) 주방 풀은 달러 단위로 버린다(floor). 버려진 센트 잔돈은
+ *    3의 서버 균등 분배 풀에 더한다 (잔돈은 팁으로 지급하기 어려움).
+ *    버림된 주방 몫을 주방 근무자끼리 균등 분배한다.
  * 3. 나머지를 그 시프트에서 일한 서버 전원이 균등 분배한다.
  *    선지급 받은 사람도 균등 분배에는 그대로 참여한다.
  * 하루 합산은 computeDay. 균등 분배의 1센트 나머지는 앞에서부터 1센트씩
@@ -53,8 +57,12 @@ const TipCalc = (() => {
    *   prepays: [{personId, amountCents}],  // 선지급 (먼저 떼어줄 금액)
    * }
    * 반환: {perPerson, perPersonDetail, kitchenTotalCents,
+   *        kitchenRawCents, kitchenLeftoverCents,
    *        kitchenFromPrepayCents, poolCents, prepayTotalCents, warnings,
    *        incomplete, totalCents, distributedCents, balanced}
+   * - kitchenTotalCents는 v13부터 실제로 주방이 가져가는 총액(달러 버림 후).
+   *   버림 전 10% 원액은 kitchenRawCents, 서버 풀로 넘어간 잔돈은
+   *   kitchenLeftoverCents에 담는다.
    * - perPersonDetail[id] = {prepayCents(순액), kitchenCents, serverCents}
    *   로 구성 요소를 나눠 알려준다 (완료 요약 표시용).
    * - 검증 오류(선지급 합계 >= 총액, 선지급 음수, 서버 미선택)면 incomplete=true,
@@ -99,7 +107,9 @@ const TipCalc = (() => {
     }
     const incomplete = invalid;
 
-    let kitchenTotal = 0;
+    let kitchenRaw = 0;
+    let kitchenPaid = 0;
+    let kitchenLeftover = 0;
     let kitchenFromPrepay = 0;
     let pool = 0;
     if (!incomplete) {
@@ -115,15 +125,22 @@ const TipCalc = (() => {
       if (hasKitchen && rest > 0) {
         kitchenFromRest = Math.round(rest * CONFIG.KITCHEN_RATE);
       }
-      kitchenTotal = kitchenFromPrepay + kitchenFromRest;
-      if (hasKitchen && kitchenTotal > 0) {
-        const shares = splitCents(kitchenTotal, kitchenIds.length);
+      kitchenRaw = kitchenFromPrepay + kitchenFromRest;
+      // 2-1) v13: 주방 풀을 달러 단위로 버리고, 센트 잔돈은 서버 풀로 넘긴다.
+      kitchenPaid = kitchenRaw;
+      if (hasKitchen && kitchenRaw > 0) {
+        kitchenPaid = Math.floor(kitchenRaw / 100) * 100;
+        kitchenLeftover = kitchenRaw - kitchenPaid;
+      }
+      if (hasKitchen && kitchenPaid > 0) {
+        const shares = splitCents(kitchenPaid, kitchenIds.length);
         kitchenIds.forEach((id, i) => {
           addPart(id, 'kitchenCents', shares[i]);
         });
       }
-      // 3) 서버 전원 균등 분배 (선지급 받은 사람도 참여)
-      pool = rest - kitchenFromRest;
+      // 3) 서버 전원 균등 분배 (선지급 받은 사람도 참여).
+      //    풀에는 주방에서 넘어온 센트 잔돈(kitchenLeftover)이 더해진다.
+      pool = rest - kitchenFromRest + kitchenLeftover;
       if (serverIds.length > 0) {
         const shares = splitCents(pool, serverIds.length);
         serverIds.forEach((id, i) => {
@@ -136,7 +153,9 @@ const TipCalc = (() => {
     return {
       perPerson,
       perPersonDetail,
-      kitchenTotalCents: kitchenTotal,
+      kitchenTotalCents: kitchenPaid,
+      kitchenRawCents: kitchenRaw,
+      kitchenLeftoverCents: kitchenLeftover,
       kitchenFromPrepayCents: kitchenFromPrepay,
       poolCents: pool,
       prepayTotalCents: prepayTotal,

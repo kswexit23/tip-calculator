@@ -18,6 +18,11 @@
  *     참고 정보)만 되돌리고 손으로 고친 값은 그대로 둔다. 판독 중이면 폴링을
  *     멈추고 늦은 결과는 버리며, 백엔드 행 취소·파일 삭제는 best-effort로 건다
  *     (정책 SQL은 add-v9-photo-delete.sql, 없어도 UI는 동작).
+ * v13: 계산 규칙 변경(calc.js — 주방 몫 달러 버림, 잔돈은 서버 풀)의 소급
+ *     적용. 앱을 열 때 로드된 날짜에 재계산 가능한 입력(총액 + 유지된 선택)이
+ *     있으면 그 날짜의 히스토리 기록을 새 규칙 결과로 덮어써서, 달력·팁 지급
+ *     합계에 옛 숫자가 남지 않게 한다 (migrateHistoryOnLoad). 입력이 없는
+ *     날짜는 건드리지 않는다.
  * v12: 완료 버튼 위 안내 — 총액이 없어서 완료 버튼이 비활성인 경우 버튼 바로
  *     위에 "팁 총액을 입력하면 완료할 수 있어요"를 표시한다. 총액 미입력
  *     상태에서는 "선지급 합계 >= 총액" 경고를 표시에서 빼 안내와 겹치지
@@ -260,6 +265,31 @@
       saveHistory(hist);
       renderCalendar();
     }
+  }
+
+  // ---------- v13 소급 적용: 로드 시 히스토리 재계산 마이그레이션 ----------
+  // 계산 규칙이 바뀌면(예: v13 주방 몫 달러 버림), 이미 저장된 날짜 기록에는
+  // 옛 규칙의 숫자가 남는다. 앱을 다시 열었을 때, 지금 로드된 날짜에
+  // 재계산 가능한 입력이 남아 있으면 새 규칙으로 다시 계산해 그 날짜의
+  // 기록을 덮어써서 달력·팁 지급 합계까지 새 숫자로 맞춘다.
+  // 조건 (전부 만족할 때만):
+  //  - 로드된 날짜에 팁 총액 입력이 있고, 계산이 합계 검증까지 균형 잡힐 것
+  //    (완료한 시프트처럼 선택이 유지돼 있어야 재계산이 된다)
+  //  - 새 기록(buildDayEntry)을 만들 수 있을 것
+  // 입력이 없는 날짜(둘러보기 상태 포함)와 재계산이 안 되는 날짜는 건드리지
+  // 않고, 로드 시점에 기록을 지우는 일도 없다. 이후 사용자가 입력을 다시
+  // 건드리면 기존 syncHistory가 같은 방식으로 계속 맞춰 준다.
+  function migrateHistoryOnLoad() {
+    if (!state.date) return;
+    var day = currentDayResult();
+    if (day.totalCents === 0 || !day.balanced) return;
+    var entry = buildDayEntry(day);
+    if (!entry) return;
+    var hist = loadHistory();
+    if (JSON.stringify(hist[state.date]) === JSON.stringify(entry)) return;
+    hist[state.date] = entry;
+    saveHistory(hist);
+    renderCalendar();
   }
 
   // 두 시프트의 입력(금액·선지급·사진 정보)과 사람 선택을 비운다.
@@ -777,9 +807,14 @@
     }).map(function (id) { return personById(id).name; });
     var kitchenHtml = '';
     if (kitchenNames.length > 0) {
-      // v7: 주방 몫은 선지급에서도 먼저 가므로 언제나 팁 전체의 10%다.
+      // v7: 주방 몫은 선지급에서도 먼저 가므로 풀은 언제나 팁 전체의 10%다.
+      // v13: 그 풀을 달러 단위로 버려서 나눠 갖고, 센트 잔돈은 서버가 가져간다.
+      var kitchenMid = result.kitchenLeftoverCents > 0
+        ? ' — 팁 전체의 10%인 ' + fmt(result.kitchenRawCents) +
+          '에서 센트 잔돈은 서버가 가져가고, '
+        : ' — 팁 전체의 10%인 ';
       kitchenHtml = '<p class="kitchen-note">🍳 주방 ' + esc(kitchenNames.join(', ')) +
-        ' — 팁 전체의 10%인 <span data-kitchen-amount>' + fmt(result.kitchenTotalCents) +
+        kitchenMid + '<span data-kitchen-amount>' + fmt(result.kitchenTotalCents) +
         '</span>를 나눠 가져요.</p>';
     }
 
@@ -1482,4 +1517,7 @@
 
   save();
   renderAll();
+  // v13: 로드된 날짜에 재계산 가능한 입력이 있으면 히스토리를 새 규칙으로
+  // 다시 맞춘다 (소급 적용 — 위 migrateHistoryOnLoad 참고).
+  migrateHistoryOnLoad();
 })();
