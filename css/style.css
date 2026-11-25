@@ -383,26 +383,8 @@ table.result .edit-input {
 .grand-row.grand-total .grand-name { font-size: 20px; }
 .grand-row.grand-total .grand-amount { font-size: 27px; color: var(--accent); }
 
-/* 다른 폰과 연결 (v16 동기화) */
+/* 기록 공유 상태 (v16 동기화 → v17 단일 공유 공간: 상태 한 줄만) */
 .sync-box {
   margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);
 }
-.sync-title { margin: 0 0 4px; font-size: 18px; }
-.sync-code-row {
-  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px;
-}
-.sync-code-label { font-weight: 700; color: var(--muted); font-size: 15px; }
-.sync-code {
-  font-size: 24px; font-weight: 800; letter-spacing: 2px; color: var(--accent);
-}
-.sync-join-row { display: flex; gap: 8px; margin-top: 12px; }
-.sync-join-row input {
-  flex: 1; min-width: 0; min-height: 48px; padding: 8px 12px;
-  font-size: 17px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
-  background: var(--bg); color: var(--text);
-  border: 1px solid var(--border); border-radius: 10px;
-}
-.sync-join-row .btn { flex-shrink: 0; }
-.sync-msg { color: var(--accent); font-weight: 600; font-size: 14.5px; margin: 10px 0 0; }
-.sync-msg:empty { display: none; }
 .sync-status { color: var(--muted); font-weight: 600; font-size: 14.5px; margin: 8px 0 0; }

@@ -39,6 +39,15 @@
  *     때문에 사라지지 않는다. 서버가 없거나 닿지 않아도 앱은 로컬만으로
  *     완전히 동작한다 (백엔드는 add-v16-sync.sql, 코드는 파일 맨 아래
  *     "폰 간 동기화" 절 참고).
+ * v17: 연결 코드 폐지 → 단일 공유 공간. 사용자가 "누구든 웹에 접속하면
+ *     볼 수 있게"를 명시해, 앱이 항상 고정 공유 코드(RQ5EVBJP)의 행만
+ *     쓴다. 기기에 저장된 옛 코드는 무시하고 교체하되, 로컬 데이터는
+ *     날짜 단위 병합으로 공유 공간에 합쳐 유실이 없다. 코드 표시·입력
+ *     UI는 없애고 동기화 상태 한 줄만 남겼다. 보안 전제가 달라졌다:
+ *     코드가 비밀인 모델이 아니라, 주소를 아는 누구나 보고 입력할 수
+ *     있는 공개 공유 모델이다. 함께, 연도가 잘못 저장된 레거시 날짜
+ *     키(예 '2022-11-21', ts 0)를 같은 월·일의 2026년 날짜로 옮기는
+ *     일회성 복구를 넣었다 (repairLegacyKeysInMap).
  * v15: 달력 "기간 합계" — 달력에서 시작 날짜와 종료 날짜를 둘 다 고르면
  *     그 기간의 직원별 합계 + 전체 합계가 달력 아래 패널에 뜬다. 기간 길이는
  *     자유 (이틀이면 이틀 합계). 탭 한 번은 시작일(+기존처럼 그날로 둘러보기
@@ -1937,7 +1946,7 @@
     renderShift('pm');
     renderResults();
     renderCalendar();
-    renderSyncSection(); // v16: 연결 코드·동기화 상태 표시 갱신
+    renderSyncSection(); // v16~: 공유 상태 표시 갱신
   }
 
   // ---------- 전역 이벤트 ----------
@@ -2073,13 +2082,19 @@
     renderAll();
   });
 
-  // ---------- 폰 간 기록 공유 (v16 동기화) ----------
+  // ---------- 기록 공유 (v16 동기화 → v17 단일 공유 공간) ----------
   // 문제: 정산 데이터가 전부 localStorage에만 있어서 입력한 폰에서만
   // 보였다 — 매니저 폰으로 입력한 기록을 사장님 폰에서 볼 수 없었다.
-  // 방식: 가게 연결 코드(읽기 쉬운 8자리 영숫자)를 같은 코드로 맞춘
-  // 폰끼리, 사진 판독과 같은 Supabase 프로젝트의 tiptalk_store_data
-  // 행 하나(store_code가 키)를 공유한다. 로그인·비밀번호는 없다 —
-  // 코드 자체가 비밀이다 (add-v16-sync.sql의 보안 모델 주석 참고).
+  // v16 방식: 가게 연결 코드(8자리)를 맞춘 폰끼리, 사진 판독과 같은
+  // Supabase 프로젝트의 tiptalk_store_data 행 하나(store_code가 키)를
+  // 공유했다.
+  // v17 방식 (사용자 명시 지시): 연결 코드를 없애고, 앱이 항상 고정
+  // 공유 코드(SHARED_STORE_CODE)의 행만 쓴다 — 웹 주소를 여는 누구나
+  // 같은 기록을 보고 입력할 수 있는 단일 공유 공간이다. 기기에 저장된
+  // 옛 코드는 무시하고 고정 코드로 교체하되, 그 기기의 로컬 데이터는
+  // 아래 병합 규칙 그대로 공유 공간에 합쳐진다 (유실 금지).
+  // ★ 보안 전제 변경: v16은 "코드가 비밀"인 모델이었지만, v17은
+  //   주소를 아는 누구나 읽고 쓸 수 있는 공개 공유 모델이다.
   //
   // 병합 규칙 (데이터 유실 방지가 최우선):
   //  - 날짜별 기록·직접 수정값은 날짜 단위로 병합한다. 각 날짜에는
@@ -2088,39 +2103,26 @@
   //  - 삭제는 톰스톤(del)으로 전파한다 — 삭제 시각보다 항목 시각이
   //    더 최근이면 항목이 살아남으므로, 동기화 때문에 입력한 기록이
   //    사라지는 일은 없다.
-  //  - 동률이면 원격(코드 쪽) 항목이 이긴다 (폰들이 같은 결과로 수렴).
+  //  - 동률이면 원격(공유 공간 쪽) 항목이 이긴다 (기기들이 같은
+  //    결과로 수렴).
   //  - 명단은 id 합집합으로 병합한다 (동기화로 사람이 사라지지 않게).
   //  - 날짜별 입력은 날짜별 스냅샷(inputs)으로 병합하고, 지금 보고
   //    있는 날짜의 더 최근 스냅샷은 편집 중이 아닐 때만 화면에 채택한다.
   // 동기화 시점: 앱 로드(pull→병합→렌더→push), 로컬 변경 후 0.8초
   // 디바운스 push(그때도 pull→병합을 먼저 한다), online 복귀·화면
   // 재표시 때도 재동기화. 서버가 없거나(테이블 미적용) 닿지 않아도
-  // 앱은 로컬만으로 완전히 동작하고, 연결 섹션에 상태 한 줄만 보인다.
+  // 앱은 로컬만으로 완전히 동작하고, 명단 카드에 상태 한 줄만 보인다.
   var SYNC_LS_KEY = 'tiptalk_sync_v1';
   var SYNC_TABLE = 'tiptalk_store_data';
   var SYNC_SB_URL = 'https://jaysizdszykzvpmlyzmt.supabase.co';
   var SYNC_ANON_KEY = 'sb_publishable_G32lpjwxN2lfMUw22438MQ_Np07ZBqC';
-  // 헷갈리는 문자(0/O, 1/I/L)를 뺀 알파벳 — 소리 내어 읽어주기 쉽다.
-  var CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  // v17: 고정 공유 코드 — 이미 서버에 행이 있고 사장님 브라우저가
+  // 업로드한 데이터가 들어 있는 공간. 모든 기기가 이 코드만 쓴다.
+  var SHARED_STORE_CODE = 'RQ5EVBJP';
   var syncMeta = null;      // initSync()에서 채워진다. 그 전에는 훅이 전부 무동작.
   var syncStatus = 'idle';  // idle | syncing | ok | offline | error
   var syncInFlight = false;
   var syncPushTimer = null;
-
-  function genStoreCode() {
-    var s = '';
-    for (var i = 0; i < 8; i++) {
-      s += CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)];
-    }
-    return s;
-  }
-  function isValidStoreCode(code) {
-    if (typeof code !== 'string' || code.length !== 8) return false;
-    for (var i = 0; i < code.length; i++) {
-      if (CODE_ALPHABET.indexOf(code[i]) < 0) return false;
-    }
-    return true;
-  }
   // 키 순서를 정렬한 JSON — jsonb 왕복으로 키 순서가 바뀌어도 같은
   // 내용이면 같다고 판정하기 위한 비교용 직렬화.
   function stableJson(v) {
@@ -2144,8 +2146,8 @@
     try { localStorage.setItem(SYNC_LS_KEY, JSON.stringify(syncMeta)); } catch (e) { /* 무시 */ }
   }
   // 동기화 메타를 읽거나 처음 만든다. 처음 만들 때는 기존 로컬 데이터가
-  // 자기 코드로 그대로 업로드되게(마이그레이션) 기준 시각을 0으로 둔다 —
-  // 실제 편집(시각 > 0)이 항상 이기고, 동률이면 원격이 이긴다.
+  // 공유 공간으로 그대로 업로드되게(마이그레이션) 기준 시각을 0으로
+  // 둔다 — 실제 편집(시각 > 0)이 항상 이기고, 동률이면 원격이 이긴다.
   function loadSyncMeta() {
     var m = null;
     try {
@@ -2153,9 +2155,11 @@
       if (raw) m = JSON.parse(raw);
     } catch (e) { m = null; }
     if (!m || typeof m !== 'object' || Array.isArray(m)) m = {};
-    if (typeof m.code !== 'string' || !/^[A-Z0-9]{6,12}$/.test(m.code)) {
-      m.code = genStoreCode();
-    }
+    // v17: 기기에 저장된 옛 연결 코드는 무시하고 항상 고정 공유 코드를
+    // 쓴다. 메타의 날짜별 시각 지도(histTs 등)는 그대로 유지되므로,
+    // 이 기기가 로컬에만 갖고 있던 날짜 기록은 첫 동기화 때 날짜 단위
+    // 병합 규칙 그대로 공유 공간에 합쳐진다.
+    m.code = SHARED_STORE_CODE;
     ['histTs', 'histDel', 'ovTs', 'ovDel', 'inputs'].forEach(function (k) {
       if (!m[k] || typeof m[k] !== 'object' || Array.isArray(m[k])) m[k] = {};
     });
@@ -2340,6 +2344,55 @@
     };
   }
 
+  // ---------- 레거시 날짜 복구 (v17, 일회성) ----------
+  // 옛 버전에서 연도가 잘못 저장된 날짜 키가 ts 0인 레거시 항목으로
+  // 남아 있다 — 실증 사례: 2026-11-21 저녁 정산(지선 319.69, Young
+  // 29.93, 합계 $349.62)이 서버 행과 사장님 로컬에 '2022-11-21'로
+  // 저장돼 있었다. 연도가 2026보다 작고 ts가 0인 항목을 같은 월·일의
+  // 2026년 날짜로 옮긴다. 대상 날짜에 기존 항목이 있을 때는 옮기지
+  // 않는다 (덮어쓰기로 인한 유실 방지). 옮긴 항목에는 현재 시각을
+  // 부여해 병합에서 이기게 하고, 옛 키는 톰스톤 처리해 다른 기기의
+  // 옛 키도 정리되게 한다. 복구가 끝나면 해당 키가 더 이상 조건에
+  // 걸리지 않아 자연히 한 번만 일어난다.
+  var legacyRepairCount = 0;
+  function repairLegacyKeysInMap(entries, ts, del) {
+    var now = Date.now();
+    var moved = 0;
+    Object.keys(entries || {}).forEach(function (d) {
+      var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d);
+      if (!m) return;
+      if (parseInt(m[1], 10) >= 2026) return;
+      if ((ts[d] || 0) !== 0) return;
+      var target = '2026-' + m[2] + '-' + m[3];
+      if (entries[target] !== undefined) return;
+      entries[target] = entries[d];
+      ts[target] = now;
+      delete entries[d];
+      delete ts[d];
+      del[d] = now;
+      moved++;
+    });
+    if (moved > 0) legacyRepairCount += moved;
+    return moved;
+  }
+  // 이 기기 로컬(저장소+메타)에 대한 복구 — initSync에서 첫 동기화
+  // 전에 실행해, 복구된 상태가 첫 병합·push에 실리게 한다.
+  function repairLocalLegacyDates() {
+    var repaired = false;
+    var hist = loadHistory();
+    if (repairLegacyKeysInMap(hist, syncMeta.histTs, syncMeta.histDel) > 0) {
+      rawSetHistory(hist);
+      repaired = true;
+    }
+    var ov = loadOverrides();
+    if (repairLegacyKeysInMap(ov, syncMeta.ovTs, syncMeta.ovDel) > 0) {
+      rawSetOverrides(ov);
+      repaired = true;
+    }
+    if (repaired) syncSaveMeta();
+    return repaired;
+  }
+
   // 원격 행을 로컬에 병합한다. 로컬 데이터(기록·수정값·명단·현재 입력)가
   // 실제로 바뀌었으면 true.
   function applyRemotePayload(remote) {
@@ -2347,6 +2400,8 @@
     var changed = false;
     var metaTouched = false;
     var hm = mergeDatedMap(loadHistory(), syncMeta.histTs, syncMeta.histDel, remote.history);
+    // v17: 병합 결과에 남은 레거시 날짜 키(원격에만 있던 것 포함)를 복구.
+    if (repairLegacyKeysInMap(hm.entries, hm.ts, hm.del) > 0) hm.changed = true;
     if (hm.changed) { rawSetHistory(hm.entries); changed = true; }
     if (stableJson(syncMeta.histTs) !== stableJson(hm.ts) ||
         stableJson(syncMeta.histDel) !== stableJson(hm.del)) {
@@ -2355,6 +2410,8 @@
       metaTouched = true;
     }
     var om = mergeDatedMap(loadOverrides(), syncMeta.ovTs, syncMeta.ovDel, remote.overrides);
+    // v17: 직접 수정값 쪽 레거시 날짜 키도 같은 규칙으로 복구.
+    if (repairLegacyKeysInMap(om.entries, om.ts, om.del) > 0) om.changed = true;
     if (om.changed) { rawSetOverrides(om.entries); changed = true; }
     if (stableJson(syncMeta.ovTs) !== stableJson(om.ts) ||
         stableJson(syncMeta.ovDel) !== stableJson(om.del)) {
@@ -2483,96 +2540,41 @@
     }, 800);
   }
 
-  // ---------- 연결 섹션 UI (명단 카드 안) ----------
+  // ---------- 공유 상태 UI (명단 카드 안, v17: 상태 한 줄만) ----------
   function syncStatusText() {
     if (!syncMeta) return '이 폰에만 저장 중';
-    if (syncStatus === 'ok') return '✓ 동기화됨';
-    if (syncStatus === 'syncing') return '동기화 중…';
+    if (syncStatus === 'ok') return '기록이 모든 폰에 공유돼요 · ✓ 동기화됨';
+    if (syncStatus === 'syncing') return '기록이 모든 폰에 공유돼요 · 동기화 중…';
     if (syncStatus === 'offline') return '오프라인 — 이 폰에만 저장 중';
     if (syncStatus === 'error') return '서버에 닿지 못해 이 폰에만 저장 중이에요';
-    return '이 폰에만 저장 중';
+    return '기록이 모든 폰에 공유돼요';
   }
   function setSyncStatus(s) {
     syncStatus = s;
     renderSyncSection();
   }
   function renderSyncSection() {
-    var codeEl = document.querySelector('[data-sync-code]');
-    if (codeEl && syncMeta) codeEl.textContent = syncMeta.code;
     var stEl = document.querySelector('[data-sync-status]');
     if (stEl) stEl.textContent = syncStatusText();
     // 테스트·디버깅용으로 동기화 상태를 노출한다 (지급 내역과 같은 방식).
     window.__tiptalkSync = {
       code: syncMeta ? syncMeta.code : null,
       status: syncStatus,
+      repaired: legacyRepairCount,
     };
-  }
-  function attachSyncListeners() {
-    var copyBtn = document.querySelector('[data-sync-copy]');
-    if (copyBtn) {
-      copyBtn.addEventListener('click', function () {
-        if (!syncMeta) return;
-        function done() {
-          copyBtn.textContent = '복사했어요 ✓';
-          setTimeout(function () { copyBtn.textContent = '복사'; }, 2000);
-        }
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(syncMeta.code).then(done)
-            .catch(function () { fallbackCopy(syncMeta.code); done(); });
-        } else {
-          fallbackCopy(syncMeta.code);
-          done();
-        }
-      });
-    }
-    var joinBtn = document.querySelector('[data-sync-join]');
-    var codeInput = document.querySelector('[data-sync-input]');
-    function showSyncMsg(t) {
-      var msg = document.querySelector('[data-sync-msg]');
-      if (msg) msg.textContent = t;
-    }
-    function join() {
-      if (!syncMeta || !codeInput) return;
-      var entered = String(codeInput.value || '').toUpperCase()
-        .replace(/[^A-Z0-9]/g, '');
-      if (!isValidStoreCode(entered)) {
-        showSyncMsg('코드는 8자리예요. 상대 폰의 연결 코드를 확인해 주세요.');
-        return;
-      }
-      if (entered === syncMeta.code) {
-        showSyncMsg('지금 이 폰의 코드예요.');
-        return;
-      }
-      // 연결 전 확인 한 번: 두 폰의 기록이 합쳐진다는 안내를 포함한다.
-      var ok = window.confirm(
-        '지금 폰의 기록과 "' + entered + '" 코드의 기록이 합쳐져요.\n' +
-        '서로 없는 날짜는 그대로 합쳐지고, 같은 날짜는 최근에 고친 쪽이 남아요.\n' +
-        '연결할까요?');
-      if (!ok) return;
-      syncMeta.code = entered;
-      syncSaveMeta();
-      renderSyncSection();
-      showSyncMsg('연결했어요. 기록을 합치는 중이에요…');
-      syncNow('connect').then(function () {
-        renderAll();
-        showSyncMsg('연결됐어요 — 이제 이 코드로 같이 동기화돼요.');
-      });
-    }
-    if (joinBtn) joinBtn.addEventListener('click', join);
-    if (codeInput) {
-      codeInput.addEventListener('keydown', function (e) {
-        if (e.key === 'Enter') { e.preventDefault(); join(); }
-      });
-    }
   }
   function initSync() {
     syncMeta = loadSyncMeta();
+    // v17: 첫 동기화 전에 이 기기 로컬의 레거시 날짜 키를 복구한다 —
+    // 복구된 상태가 첫 병합·push에 실리고, 옛 키 톰스톤이 다른
+    // 기기로도 전파된다.
+    var repaired = repairLocalLegacyDates();
     renderSyncSection();
-    attachSyncListeners();
     window.addEventListener('online', function () { syncNow('online'); });
     document.addEventListener('visibilitychange', function () {
       if (!document.hidden) syncNow('visible');
     });
+    if (repaired) renderAll();
     syncNow('load');
   }
 
@@ -2581,7 +2583,8 @@
   // v13: 로드된 날짜에 재계산 가능한 입력이 있으면 히스토리를 새 규칙으로
   // 다시 맞춘다 (소급 적용 — 위 migrateHistoryOnLoad 참고).
   migrateHistoryOnLoad();
-  // v16: 연결 코드 준비 + 첫 동기화 (기존 로컬 데이터는 자기 코드로
-  // 자동 업로드된다). 서버가 없어도 앱은 로컬만으로 계속 동작한다.
+  // v17: 고정 공유 공간으로 첫 동기화 (기존 로컬 데이터는 날짜 단위
+  // 병합으로 공유 공간에 합쳐진다). 서버가 없어도 앱은 로컬만으로
+  // 계속 동작한다.
   initSync();
 })();
