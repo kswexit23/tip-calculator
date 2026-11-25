@@ -30,6 +30,15 @@
  *     되지만 배너에 차이를 정직하게 표시한다. 그 날짜의 입력(총액·선택·
  *     선지급)이 바뀌면 수정은 해제되고 계산값으로 돌아가며, v13 로드
  *     마이그레이션도 수정된 날짜는 절대 덮어쓰지 않는다.
+ * v16: 폰 간 기록 공유(동기화) — 데이터가 localStorage에만 있으면 입력한
+ *     폰에서만 보여서, 매니저 폰으로 입력한 기록을 사장님 폰에서 볼 수
+ *     없던 문제. 가게 연결 코드(8자리)를 같은 코드로 맞춘 폰끼리 Supabase
+ *     (사진 판독과 같은 프로젝트)의 tiptalk_store_data 행 하나로 날짜별
+ *     기록·직접 수정값·날짜별 입력·명단을 공유한다. 병합은 날짜 단위
+ *     최근 수정 우선 + 삭제 톰스톤이라, 어느 폰에서 입력한 기록도 동기화
+ *     때문에 사라지지 않는다. 서버가 없거나 닿지 않아도 앱은 로컬만으로
+ *     완전히 동작한다 (백엔드는 add-v16-sync.sql, 코드는 파일 맨 아래
+ *     "폰 간 동기화" 절 참고).
  * v15: 달력 "기간 합계" — 달력에서 시작 날짜와 종료 날짜를 둘 다 고르면
  *     그 기간의 직원별 합계 + 전체 합계가 달력 아래 패널에 뜬다. 기간 길이는
  *     자유 (이틀이면 이틀 합계). 탭 한 번은 시작일(+기존처럼 그날로 둘러보기
@@ -197,6 +206,7 @@
   var state = loadState();
   function save() {
     try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch (e) { /* 저장 실패 무시 */ }
+    syncNoteStateChange(); // v16: 입력·명단이 바뀌었으면 동기화 스냅샷 갱신 + push 예약
   }
 
   // ---------- 날짜 도우미 (전부 기기 현지 날짜 기준) ----------
@@ -233,6 +243,11 @@
     } catch (e) { return {}; }
   }
   function saveHistory(h) {
+    syncNoteDatedChange('history', h); // v16: 변경 날짜의 동기화 시각 기록 + push 예약
+    rawSetHistory(h);
+  }
+  // v16: 동기화 병합 결과를 그대로 쓸 때의 기록 저장 (시각을 다시 찍지 않는다).
+  function rawSetHistory(h) {
     try { localStorage.setItem(LS_HISTORY_KEY, JSON.stringify(h)); } catch (e) { /* 무시 */ }
   }
   // 현재 화면 입력을 사용자가 실제로 건드렸을 때만 true. 날짜만 바꿔서 표를
@@ -255,6 +270,11 @@
     } catch (e) { return {}; }
   }
   function saveOverrides(o) {
+    syncNoteDatedChange('overrides', o); // v16: 위 saveHistory와 같은 동기화 훅
+    rawSetOverrides(o);
+  }
+  // v16: 동기화 병합 결과 전용 (시각을 다시 찍지 않는다).
+  function rawSetOverrides(o) {
     try { localStorage.setItem(LS_OVERRIDE_KEY, JSON.stringify(o)); } catch (e) { /* 무시 */ }
   }
   function overrideFor(date) {
@@ -1917,6 +1937,7 @@
     renderShift('pm');
     renderResults();
     renderCalendar();
+    renderSyncSection(); // v16: 연결 코드·동기화 상태 표시 갱신
   }
 
   // ---------- 전역 이벤트 ----------
@@ -2052,9 +2073,515 @@
     renderAll();
   });
 
+  // ---------- 폰 간 기록 공유 (v16 동기화) ----------
+  // 문제: 정산 데이터가 전부 localStorage에만 있어서 입력한 폰에서만
+  // 보였다 — 매니저 폰으로 입력한 기록을 사장님 폰에서 볼 수 없었다.
+  // 방식: 가게 연결 코드(읽기 쉬운 8자리 영숫자)를 같은 코드로 맞춘
+  // 폰끼리, 사진 판독과 같은 Supabase 프로젝트의 tiptalk_store_data
+  // 행 하나(store_code가 키)를 공유한다. 로그인·비밀번호는 없다 —
+  // 코드 자체가 비밀이다 (add-v16-sync.sql의 보안 모델 주석 참고).
+  //
+  // 병합 규칙 (데이터 유실 방지가 최우선):
+  //  - 날짜별 기록·직접 수정값은 날짜 단위로 병합한다. 각 날짜에는
+  //    마지막으로 바뀐 시각(ts)이 붙고, 양쪽에 있으면 더 최근 것이
+  //    이기며, 한쪽에만 있는 날짜는 그대로 합쳐진다.
+  //  - 삭제는 톰스톤(del)으로 전파한다 — 삭제 시각보다 항목 시각이
+  //    더 최근이면 항목이 살아남으므로, 동기화 때문에 입력한 기록이
+  //    사라지는 일은 없다.
+  //  - 동률이면 원격(코드 쪽) 항목이 이긴다 (폰들이 같은 결과로 수렴).
+  //  - 명단은 id 합집합으로 병합한다 (동기화로 사람이 사라지지 않게).
+  //  - 날짜별 입력은 날짜별 스냅샷(inputs)으로 병합하고, 지금 보고
+  //    있는 날짜의 더 최근 스냅샷은 편집 중이 아닐 때만 화면에 채택한다.
+  // 동기화 시점: 앱 로드(pull→병합→렌더→push), 로컬 변경 후 0.8초
+  // 디바운스 push(그때도 pull→병합을 먼저 한다), online 복귀·화면
+  // 재표시 때도 재동기화. 서버가 없거나(테이블 미적용) 닿지 않아도
+  // 앱은 로컬만으로 완전히 동작하고, 연결 섹션에 상태 한 줄만 보인다.
+  var SYNC_LS_KEY = 'tiptalk_sync_v1';
+  var SYNC_TABLE = 'tiptalk_store_data';
+  var SYNC_SB_URL = 'https://jaysizdszykzvpmlyzmt.supabase.co';
+  var SYNC_ANON_KEY = 'sb_publishable_G32lpjwxN2lfMUw22438MQ_Np07ZBqC';
+  // 헷갈리는 문자(0/O, 1/I/L)를 뺀 알파벳 — 소리 내어 읽어주기 쉽다.
+  var CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  var syncMeta = null;      // initSync()에서 채워진다. 그 전에는 훅이 전부 무동작.
+  var syncStatus = 'idle';  // idle | syncing | ok | offline | error
+  var syncInFlight = false;
+  var syncPushTimer = null;
+
+  function genStoreCode() {
+    var s = '';
+    for (var i = 0; i < 8; i++) {
+      s += CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)];
+    }
+    return s;
+  }
+  function isValidStoreCode(code) {
+    if (typeof code !== 'string' || code.length !== 8) return false;
+    for (var i = 0; i < code.length; i++) {
+      if (CODE_ALPHABET.indexOf(code[i]) < 0) return false;
+    }
+    return true;
+  }
+  // 키 순서를 정렬한 JSON — jsonb 왕복으로 키 순서가 바뀌어도 같은
+  // 내용이면 같다고 판정하기 위한 비교용 직렬화.
+  function stableJson(v) {
+    if (v === null || typeof v !== 'object') return JSON.stringify(v);
+    if (Array.isArray(v)) {
+      return '[' + v.map(stableJson).join(',') + ']';
+    }
+    return '{' + Object.keys(v).sort().map(function (k) {
+      return JSON.stringify(k) + ':' + stableJson(v[k]);
+    }).join(',') + '}';
+  }
+  function syncHash(str) {
+    var h = 5381;
+    for (var i = 0; i < str.length; i++) {
+      h = ((h * 33) ^ str.charCodeAt(i)) >>> 0;
+    }
+    return 'h' + h.toString(36);
+  }
+  function syncSaveMeta() {
+    if (!syncMeta) return;
+    try { localStorage.setItem(SYNC_LS_KEY, JSON.stringify(syncMeta)); } catch (e) { /* 무시 */ }
+  }
+  // 동기화 메타를 읽거나 처음 만든다. 처음 만들 때는 기존 로컬 데이터가
+  // 자기 코드로 그대로 업로드되게(마이그레이션) 기준 시각을 0으로 둔다 —
+  // 실제 편집(시각 > 0)이 항상 이기고, 동률이면 원격이 이긴다.
+  function loadSyncMeta() {
+    var m = null;
+    try {
+      var raw = localStorage.getItem(SYNC_LS_KEY);
+      if (raw) m = JSON.parse(raw);
+    } catch (e) { m = null; }
+    if (!m || typeof m !== 'object' || Array.isArray(m)) m = {};
+    if (typeof m.code !== 'string' || !/^[A-Z0-9]{6,12}$/.test(m.code)) {
+      m.code = genStoreCode();
+    }
+    ['histTs', 'histDel', 'ovTs', 'ovDel', 'inputs'].forEach(function (k) {
+      if (!m[k] || typeof m[k] !== 'object' || Array.isArray(m[k])) m[k] = {};
+    });
+    if (typeof m.inputsTs !== 'number') m.inputsTs = 0;
+    if (typeof m.rosterTs !== 'number') m.rosterTs = 0;
+    Object.keys(loadHistory()).forEach(function (d) {
+      if (m.histTs[d] == null && !m.histDel[d]) m.histTs[d] = 0;
+    });
+    Object.keys(loadOverrides()).forEach(function (d) {
+      if (m.ovTs[d] == null && !m.ovDel[d]) m.ovTs[d] = 0;
+    });
+    if (!m.inputs[state.date]) {
+      m.inputs[state.date] = {
+        shifts: JSON.parse(JSON.stringify(state.shifts)), ts: 0,
+      };
+    }
+    m.inputsHash = syncHash(JSON.stringify({ d: state.date, s: state.shifts }));
+    m.rosterHash = syncHash(JSON.stringify(state.roster));
+    try { localStorage.setItem(SYNC_LS_KEY, JSON.stringify(m)); } catch (e) { /* 무시 */ }
+    return m;
+  }
+
+  // 날짜 단위 맵(기록·수정값)의 로컬 변경을 메타에 반영한다:
+  // 내용이 바뀐 날짜는 ts=지금, 사라진 날짜는 톰스톤=지금.
+  function syncNoteDatedChange(kind, newMap) {
+    if (!syncMeta) return;
+    var oldMap = kind === 'history' ? loadHistory() : loadOverrides();
+    var tsMap = kind === 'history' ? syncMeta.histTs : syncMeta.ovTs;
+    var delMap = kind === 'history' ? syncMeta.histDel : syncMeta.ovDel;
+    var now = Date.now();
+    var touched = false;
+    Object.keys(newMap || {}).forEach(function (d) {
+      if (stableJson(oldMap[d]) !== stableJson(newMap[d])) {
+        tsMap[d] = now;
+        delete delMap[d];
+        touched = true;
+      }
+    });
+    Object.keys(oldMap).forEach(function (d) {
+      if (!newMap || newMap[d] === undefined) {
+        delMap[d] = now;
+        delete tsMap[d];
+        touched = true;
+      }
+    });
+    if (touched) {
+      syncSaveMeta();
+      scheduleSyncPush();
+    }
+  }
+  // 입력(시프트)·명단의 로컬 변경을 스냅샷에 반영한다. 내용이 실제로
+  // 바뀐 경우에만 시각을 올린다 — 앱을 열기만 한 폰이 낡은 입력으로
+  // 다른 폰의 최근 편집을 덮지 않게.
+  function syncNoteStateChange() {
+    if (!syncMeta) return;
+    var now = Date.now();
+    var touched = false;
+    var ih = syncHash(JSON.stringify({ d: state.date, s: state.shifts }));
+    if (ih !== syncMeta.inputsHash) {
+      syncMeta.inputsHash = ih;
+      syncMeta.inputsTs = now;
+      syncMeta.inputs[state.date] = {
+        shifts: JSON.parse(JSON.stringify(state.shifts)), ts: now,
+      };
+      touched = true;
+    }
+    var rh = syncHash(JSON.stringify(state.roster));
+    if (rh !== syncMeta.rosterHash) {
+      syncMeta.rosterHash = rh;
+      syncMeta.rosterTs = now;
+      touched = true;
+    }
+    if (touched) {
+      syncSaveMeta();
+      scheduleSyncPush();
+    }
+  }
+
+  // 날짜 단위 맵 병합. 후보(로컬 항목/원격 항목/로컬 삭제/원격 삭제) 중
+  // 가장 최근이 이긴다. 동률이면 항목 > 삭제, 원격 > 로컬 (수렴용).
+  function mergeDatedMap(localEntries, localTs, localDel, remoteMap) {
+    var rEntries = (remoteMap && remoteMap.entries) || {};
+    var rTs = (remoteMap && remoteMap.ts) || {};
+    var rDel = (remoteMap && remoteMap.del) || {};
+    var dates = {};
+    [localEntries, localTs, localDel, rEntries, rTs, rDel].forEach(function (m) {
+      Object.keys(m || {}).forEach(function (d) { dates[d] = true; });
+    });
+    var entries = {};
+    var ts = {};
+    var del = {};
+    Object.keys(dates).forEach(function (d) {
+      var cand = [];
+      if (localEntries[d] !== undefined) {
+        cand.push({ kind: 'entry', src: 'local', t: localTs[d] || 0, v: localEntries[d] });
+      }
+      if (rEntries[d] !== undefined) {
+        cand.push({ kind: 'entry', src: 'remote', t: rTs[d] || 0, v: rEntries[d] });
+      }
+      if (localDel[d]) cand.push({ kind: 'del', src: 'local', t: localDel[d] });
+      if (rDel[d]) cand.push({ kind: 'del', src: 'remote', t: rDel[d] });
+      if (cand.length === 0) return;
+      cand.sort(function (a, b) {
+        if (b.t !== a.t) return b.t - a.t;
+        if (a.kind !== b.kind) return a.kind === 'entry' ? -1 : 1;
+        if (a.src !== b.src) return a.src === 'remote' ? -1 : 1;
+        return 0;
+      });
+      var win = cand[0];
+      if (win.kind === 'entry') {
+        entries[d] = win.v;
+        ts[d] = win.t;
+      } else {
+        del[d] = win.t;
+      }
+    });
+    return {
+      entries: entries, ts: ts, del: del,
+      changed: stableJson(entries) !== stableJson(localEntries),
+    };
+  }
+  // 날짜별 입력 스냅샷 병합: 날짜마다 더 최근 스냅샷이 이긴다.
+  function mergeInputsByDate(localByDate, remoteByDate) {
+    var out = {};
+    var dates = {};
+    Object.keys(localByDate || {}).forEach(function (d) { dates[d] = true; });
+    Object.keys(remoteByDate || {}).forEach(function (d) { dates[d] = true; });
+    Object.keys(dates).forEach(function (d) {
+      var l = (localByDate || {})[d];
+      var r = (remoteByDate || {})[d];
+      if (l && r) out[d] = (r.ts || 0) >= (l.ts || 0) ? r : l;
+      else out[d] = l || r;
+    });
+    return out;
+  }
+  // 명단 병합: id 합집합. 같은 사람은 더 최근 명단 쪽의 정보를 쓴다.
+  // 삭제는 전파하지 않는다 (동기화로 사람이 사라지지 않게).
+  function mergeRosterLists(localList, remoteList, localTs, remoteTs) {
+    var preferRemote = (remoteTs || 0) > (localTs || 0);
+    var byId = {};
+    localList.forEach(function (p) { byId[p.id] = p; });
+    remoteList.forEach(function (p) {
+      if (!byId[p.id] || preferRemote) byId[p.id] = p;
+    });
+    var out = localList.map(function (p) { return byId[p.id]; });
+    remoteList.forEach(function (p) {
+      if (!localList.some(function (x) { return x.id === p.id; })) out.push(byId[p.id]);
+    });
+    return out;
+  }
+  // 다른 폰의 입력 스냅샷을 화면 상태로 채택할 때의 정규화 (loadState와
+  // 같은 기준: 시프트 시간은 기본값 강제, 필드 누락 보정).
+  function fixAdoptedShift(raw, def) {
+    var sh = freshShift(def.defStart, def.defEnd);
+    if (!raw || typeof raw !== 'object') return sh;
+    sh.total = raw.total == null ? '' : String(raw.total);
+    if (raw.selected && typeof raw.selected === 'object' && !Array.isArray(raw.selected)) {
+      sh.selected = raw.selected;
+    }
+    if (Array.isArray(raw.prepays)) {
+      sh.prepays = raw.prepays.filter(function (p) {
+        return p && typeof p.personId === 'string';
+      }).map(function (p) {
+        return { personId: p.personId, amount: p.amount == null ? '' : String(p.amount) };
+      });
+    }
+    sh.advancedOpen = !!raw.advancedOpen;
+    sh.done = !!raw.done;
+    if (raw.suggested && typeof raw.suggested === 'object' && !Array.isArray(raw.suggested)) {
+      sh.suggested = raw.suggested;
+    }
+    sh.photoInfo = raw.photoInfo || null;
+    var pr = raw.photoRef;
+    sh.photoRef = (pr && typeof pr === 'object' && pr.id) ? pr : null;
+    return sh;
+  }
+  function normalizeAdoptedShifts(shifts) {
+    var src = (shifts && typeof shifts === 'object') ? shifts : {};
+    return {
+      am: fixAdoptedShift(src.am, SHIFT_DEFS[0]),
+      pm: fixAdoptedShift(src.pm, SHIFT_DEFS[1]),
+    };
+  }
+
+  // 원격 행을 로컬에 병합한다. 로컬 데이터(기록·수정값·명단·현재 입력)가
+  // 실제로 바뀌었으면 true.
+  function applyRemotePayload(remote) {
+    if (!remote || !syncMeta) return false;
+    var changed = false;
+    var metaTouched = false;
+    var hm = mergeDatedMap(loadHistory(), syncMeta.histTs, syncMeta.histDel, remote.history);
+    if (hm.changed) { rawSetHistory(hm.entries); changed = true; }
+    if (stableJson(syncMeta.histTs) !== stableJson(hm.ts) ||
+        stableJson(syncMeta.histDel) !== stableJson(hm.del)) {
+      syncMeta.histTs = hm.ts;
+      syncMeta.histDel = hm.del;
+      metaTouched = true;
+    }
+    var om = mergeDatedMap(loadOverrides(), syncMeta.ovTs, syncMeta.ovDel, remote.overrides);
+    if (om.changed) { rawSetOverrides(om.entries); changed = true; }
+    if (stableJson(syncMeta.ovTs) !== stableJson(om.ts) ||
+        stableJson(syncMeta.ovDel) !== stableJson(om.del)) {
+      syncMeta.ovTs = om.ts;
+      syncMeta.ovDel = om.del;
+      metaTouched = true;
+    }
+    var rInputs = (remote.inputs && typeof remote.inputs === 'object') ? remote.inputs : {};
+    var mergedInputs = mergeInputsByDate(syncMeta.inputs, rInputs.byDate || {});
+    if (stableJson(mergedInputs) !== stableJson(syncMeta.inputs)) {
+      syncMeta.inputs = mergedInputs;
+      metaTouched = true;
+    }
+    if (Array.isArray(rInputs.roster)) {
+      var mergedRoster = mergeRosterLists(
+        state.roster, rInputs.roster, syncMeta.rosterTs, rInputs.rosterTs || 0);
+      if (stableJson(mergedRoster) !== stableJson(state.roster)) {
+        state.roster = mergeDefaultRoster(mergedRoster);
+        changed = true;
+      }
+      if ((rInputs.rosterTs || 0) > syncMeta.rosterTs) {
+        syncMeta.rosterTs = rInputs.rosterTs;
+        metaTouched = true;
+      }
+    }
+    // 지금 보고 있는 날짜의 입력: 더 최근 스냅샷이 있고, 이 폰에서
+    // 편집 중이 아닐 때만 채택한다 (편집 중인 입력을 덮지 않는다).
+    var snap = syncMeta.inputs[state.date];
+    if (!inputsDirty && snap && (snap.ts || 0) > syncMeta.inputsTs) {
+      state.shifts = normalizeAdoptedShifts(snap.shifts);
+      syncMeta.inputsTs = snap.ts;
+      changed = true;
+    }
+    if (changed) {
+      // 채택한 내용을 로컬 기준으로 고정 — 해시를 맞춰 두면 save()가
+      // 시각을 새로 찍지 않아, 방금 받은 데이터가 "내가 방금 고친 것"이
+      // 되지 않는다.
+      syncMeta.inputsHash = syncHash(JSON.stringify({ d: state.date, s: state.shifts }));
+      syncMeta.rosterHash = syncHash(JSON.stringify(state.roster));
+      save();
+    }
+    if (metaTouched) syncSaveMeta();
+    return changed;
+  }
+
+  function buildSyncPayload() {
+    return {
+      store_code: syncMeta.code,
+      history: { entries: loadHistory(), ts: syncMeta.histTs, del: syncMeta.histDel },
+      overrides: { entries: loadOverrides(), ts: syncMeta.ovTs, del: syncMeta.ovDel },
+      inputs: { byDate: syncMeta.inputs, roster: state.roster, rosterTs: syncMeta.rosterTs },
+      updated_at: new Date().toISOString(),
+    };
+  }
+  function syncPayloadMatchesRemote(payload, remote) {
+    return stableJson({ h: payload.history, o: payload.overrides, i: payload.inputs }) ===
+      stableJson({ h: remote.history || null, o: remote.overrides || null, i: remote.inputs || null });
+  }
+  function syncHeaders(extra) {
+    var h = { apikey: SYNC_ANON_KEY, Authorization: 'Bearer ' + SYNC_ANON_KEY };
+    if (extra) Object.keys(extra).forEach(function (k) { h[k] = extra[k]; });
+    return h;
+  }
+  function sbGetRow() {
+    var url = SYNC_SB_URL + '/rest/v1/' + SYNC_TABLE +
+      '?store_code=eq.' + encodeURIComponent(syncMeta.code) +
+      '&select=store_code,history,overrides,inputs,updated_at';
+    return fetch(url, { headers: syncHeaders() }).then(function (r) {
+      if (!r.ok) throw new Error('동기화 조회 실패 (' + r.status + ')');
+      return r.json();
+    }).then(function (rows) {
+      return (rows && rows[0]) ? rows[0] : null;
+    });
+  }
+  function sbUpsert(payload) {
+    var url = SYNC_SB_URL + '/rest/v1/' + SYNC_TABLE + '?on_conflict=store_code';
+    return fetch(url, {
+      method: 'POST',
+      headers: syncHeaders({
+        'Content-Type': 'application/json',
+        Prefer: 'resolution=merge-duplicates,return=minimal',
+      }),
+      body: JSON.stringify(payload),
+    }).then(function (r) {
+      if (!r.ok) throw new Error('동기화 저장 실패 (' + r.status + ')');
+      return true;
+    });
+  }
+  // 동기화 한 사이클: pull → 병합 → (로컬이 원격과 다르면) push.
+  // 실패해도 예외를 밖으로 내지 않는다 — 앱은 로컬만으로 계속 동작한다.
+  function syncNow(reason) {
+    if (!syncMeta || syncInFlight) return Promise.resolve(false);
+    if (navigator.onLine === false) {
+      setSyncStatus('offline');
+      return Promise.resolve(false);
+    }
+    syncInFlight = true;
+    setSyncStatus('syncing');
+    return sbGetRow().then(function (remote) {
+      var changed = false;
+      if (remote) changed = applyRemotePayload(remote);
+      var payload = buildSyncPayload();
+      if (remote && syncPayloadMatchesRemote(payload, remote)) {
+        return { changed: changed };
+      }
+      return sbUpsert(payload).then(function () { return { changed: changed }; });
+    }).then(function (res) {
+      syncInFlight = false;
+      syncMeta.lastOkAt = Date.now();
+      syncSaveMeta();
+      setSyncStatus('ok');
+      if (res && res.changed) renderAll();
+      return true;
+    }).catch(function () {
+      syncInFlight = false;
+      setSyncStatus(navigator.onLine === false ? 'offline' : 'error');
+      return false;
+    });
+  }
+  function scheduleSyncPush() {
+    if (!syncMeta) return;
+    if (syncPushTimer) clearTimeout(syncPushTimer);
+    syncPushTimer = setTimeout(function () {
+      syncPushTimer = null;
+      syncNow('change');
+    }, 800);
+  }
+
+  // ---------- 연결 섹션 UI (명단 카드 안) ----------
+  function syncStatusText() {
+    if (!syncMeta) return '이 폰에만 저장 중';
+    if (syncStatus === 'ok') return '✓ 동기화됨';
+    if (syncStatus === 'syncing') return '동기화 중…';
+    if (syncStatus === 'offline') return '오프라인 — 이 폰에만 저장 중';
+    if (syncStatus === 'error') return '서버에 닿지 못해 이 폰에만 저장 중이에요';
+    return '이 폰에만 저장 중';
+  }
+  function setSyncStatus(s) {
+    syncStatus = s;
+    renderSyncSection();
+  }
+  function renderSyncSection() {
+    var codeEl = document.querySelector('[data-sync-code]');
+    if (codeEl && syncMeta) codeEl.textContent = syncMeta.code;
+    var stEl = document.querySelector('[data-sync-status]');
+    if (stEl) stEl.textContent = syncStatusText();
+    // 테스트·디버깅용으로 동기화 상태를 노출한다 (지급 내역과 같은 방식).
+    window.__tiptalkSync = {
+      code: syncMeta ? syncMeta.code : null,
+      status: syncStatus,
+    };
+  }
+  function attachSyncListeners() {
+    var copyBtn = document.querySelector('[data-sync-copy]');
+    if (copyBtn) {
+      copyBtn.addEventListener('click', function () {
+        if (!syncMeta) return;
+        function done() {
+          copyBtn.textContent = '복사했어요 ✓';
+          setTimeout(function () { copyBtn.textContent = '복사'; }, 2000);
+        }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(syncMeta.code).then(done)
+            .catch(function () { fallbackCopy(syncMeta.code); done(); });
+        } else {
+          fallbackCopy(syncMeta.code);
+          done();
+        }
+      });
+    }
+    var joinBtn = document.querySelector('[data-sync-join]');
+    var codeInput = document.querySelector('[data-sync-input]');
+    function showSyncMsg(t) {
+      var msg = document.querySelector('[data-sync-msg]');
+      if (msg) msg.textContent = t;
+    }
+    function join() {
+      if (!syncMeta || !codeInput) return;
+      var entered = String(codeInput.value || '').toUpperCase()
+        .replace(/[^A-Z0-9]/g, '');
+      if (!isValidStoreCode(entered)) {
+        showSyncMsg('코드는 8자리예요. 상대 폰의 연결 코드를 확인해 주세요.');
+        return;
+      }
+      if (entered === syncMeta.code) {
+        showSyncMsg('지금 이 폰의 코드예요.');
+        return;
+      }
+      // 연결 전 확인 한 번: 두 폰의 기록이 합쳐진다는 안내를 포함한다.
+      var ok = window.confirm(
+        '지금 폰의 기록과 "' + entered + '" 코드의 기록이 합쳐져요.\n' +
+        '서로 없는 날짜는 그대로 합쳐지고, 같은 날짜는 최근에 고친 쪽이 남아요.\n' +
+        '연결할까요?');
+      if (!ok) return;
+      syncMeta.code = entered;
+      syncSaveMeta();
+      renderSyncSection();
+      showSyncMsg('연결했어요. 기록을 합치는 중이에요…');
+      syncNow('connect').then(function () {
+        renderAll();
+        showSyncMsg('연결됐어요 — 이제 이 코드로 같이 동기화돼요.');
+      });
+    }
+    if (joinBtn) joinBtn.addEventListener('click', join);
+    if (codeInput) {
+      codeInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); join(); }
+      });
+    }
+  }
+  function initSync() {
+    syncMeta = loadSyncMeta();
+    renderSyncSection();
+    attachSyncListeners();
+    window.addEventListener('online', function () { syncNow('online'); });
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden) syncNow('visible');
+    });
+    syncNow('load');
+  }
+
   save();
   renderAll();
   // v13: 로드된 날짜에 재계산 가능한 입력이 있으면 히스토리를 새 규칙으로
   // 다시 맞춘다 (소급 적용 — 위 migrateHistoryOnLoad 참고).
   migrateHistoryOnLoad();
+  // v16: 연결 코드 준비 + 첫 동기화 (기존 로컬 데이터는 자기 코드로
+  // 자동 업로드된다). 서버가 없어도 앱은 로컬만으로 계속 동작한다.
+  initSync();
 })();
