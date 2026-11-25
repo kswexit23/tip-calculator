@@ -318,6 +318,14 @@ table.result .edit-input {
 .cal-day.is-selected { background: var(--accent); border-color: var(--accent); color: #fff; }
 .cal-day.is-selected .d-num, .cal-day.is-selected .d-total { color: #fff; }
 
+/* 기간 합계 구간 선택 (v15) — 사이는 연하게, 양끝은 진하게 */
+.cal-day.in-range { background: var(--accent-soft); border-color: var(--accent); }
+.cal-day.range-start, .cal-day.range-end {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+}
+.cal-day.range-start .d-num, .cal-day.range-end .d-num,
+.cal-day.range-start .d-total, .cal-day.range-end .d-total { color: #fff; }
+
 /* 날짜별 내역 (달력 아래) */
 #dayDetail { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
 .detail-title { font-weight: 800; font-size: 17px; margin: 0 0 6px; }
@@ -329,6 +337,15 @@ table.result .edit-input {
 .detail-amt { font-weight: 800; }
 .detail-total { border-bottom: none; }
 .detail-total .detail-amt { color: var(--accent); font-size: 19px; }
+
+/* 기간 합계 패널·안내 (v15) */
+#rangePanel { margin-top: 14px; }
+#rangePanel:empty { display: none; }
+#rangePanel:not(:empty) { border-top: 1px solid var(--border); padding-top: 12px; }
+.range-period { font-weight: 700; color: var(--muted); margin: 0 0 8px; }
+.range-meta { color: var(--muted); font-weight: 600; font-size: 14.5px; margin: 10px 0 0; }
+.range-hint { color: var(--accent); font-weight: 600; font-size: 14.5px; margin: 10px 0 0; }
+.range-clear-row { margin-top: 10px; }
 
 /* 팁 지급 (v7) */
 .payout-bar { margin-top: 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }

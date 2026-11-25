@@ -30,6 +30,14 @@
  *     되지만 배너에 차이를 정직하게 표시한다. 그 날짜의 입력(총액·선택·
  *     선지급)이 바뀌면 수정은 해제되고 계산값으로 돌아가며, v13 로드
  *     마이그레이션도 수정된 날짜는 절대 덮어쓰지 않는다.
+ * v15: 달력 "기간 합계" — 달력에서 시작 날짜와 종료 날짜를 둘 다 고르면
+ *     그 기간의 직원별 합계 + 전체 합계가 달력 아래 패널에 뜬다. 기간 길이는
+ *     자유 (이틀이면 이틀 합계). 탭 한 번은 시작일(+기존처럼 그날로 둘러보기
+ *     이동해 상세 표시), 두 번째 탭은 종료일 (역순이면 자동 교체), 구간이
+ *     완성된 뒤의 탭은 새 시작일, 시작일 재탭 또는 [선택 지우기]로 해제.
+ *     월 이동을 해도 선택은 유지된다. 구간이 완성돼 있으면 "팁 지급하기"가
+ *     그 구간 합계로 내역을 만들고, 없으면 기존 동작(선택일 시작 2주)이다.
+ *     합계 기준은 tiptalk_history_v1 (v14 직접 수정값이 반영된 기록).
  * v12: 완료 버튼 위 안내 — 총액이 없어서 완료 버튼이 비활성인 경우 버튼 바로
  *     위에 "팁 총액을 입력하면 완료할 수 있어요"를 표시한다. 총액 미입력
  *     상태에서는 "선지급 합계 >= 총액" 경고를 표시에서 빼 안내와 겹치지
@@ -1520,6 +1528,10 @@
   var DOW_LABELS = ['일', '월', '화', '수', '목', '금', '토'];
   // 달력에 보고 있는 달 {y, m}. null이면 선택 날짜의 달을 따라간다.
   var calYearMonth = null;
+  // 기간 합계 구간 선택 (v15): {start, end}는 'YYYY-MM-DD' 또는 null.
+  // 화면 전용 상태라 저장하지 않는다. 달력 월 이동(renderCalendar만 다시
+  // 그림)으로는 지워지지 않아 구간이 월을 걸칠 수 있다.
+  var calRange = { start: null, end: null };
   function rosterIndexOf(name) {
     for (var i = 0; i < state.roster.length; i++) {
       if (state.roster[i].name === name) return i;
@@ -1571,6 +1583,13 @@
       var cls = 'cal-day' + (dObj.getDay() === 0 ? ' sun' : dObj.getDay() === 6 ? ' sat' : '') +
         (has ? ' has-record' : '') + (ds === todayS ? ' is-today' : '') +
         (ds === selS ? ' is-selected' : '');
+      // v15: 구간 하이라이트 — 양끝은 진하게, 사이는 연하게 (날짜 문자열은
+      // 사전순 = 날짜순이라 문자열 비교로 충분하다).
+      if (calRange.start && calRange.end && ds > calRange.start && ds < calRange.end) {
+        cls += ' in-range';
+      }
+      if (calRange.start === ds) cls += ' range-start';
+      if (calRange.end === ds) cls += ' range-end';
       html += '<button type="button" class="' + cls + '" data-cal-date="' + ds + '">' +
         '<span class="d-num">' + day + '</span>' +
         (has ? '<span class="d-total">$' +
@@ -1581,15 +1600,125 @@
     body.innerHTML = html;
     body.querySelectorAll('[data-cal-date]').forEach(function (btn) {
       btn.addEventListener('click', function () {
-        selectCalendarDate(btn.getAttribute('data-cal-date'));
+        onCalendarDateTap(btn.getAttribute('data-cal-date'));
       });
     });
     renderDayDetail(sel);
+    renderRangePanel();
     var rangeEl = $('#payoutRangeLabel');
     if (rangeEl) {
-      rangeEl.textContent = dayLabel(sel) + '부터 2주 (' + dayLabel(sel) + ' ~ ' +
-        dayLabel(addDays(sel, 13)) + ')';
+      if (calRange.start && calRange.end) {
+        var rs = parseDateStr(calRange.start);
+        var re = parseDateStr(calRange.end);
+        rangeEl.textContent = '선택한 기간 ' + dayLabel(rs) + ' ~ ' + dayLabel(re) +
+          ' 합계로 지급해요';
+      } else {
+        rangeEl.textContent = dayLabel(sel) + '부터 2주 (' + dayLabel(sel) + ' ~ ' +
+          dayLabel(addDays(sel, 13)) + ')';
+      }
     }
+  }
+
+  // 달력 날짜 탭 (v15): 구간 선택이 1차 동작이다.
+  // - 선택이 없거나 구간이 완성된 상태 → 탭한 날짜가 새 시작일이 되고,
+  //   기존처럼 그 날짜로 둘러보기 이동한다 (단일 선택 = 그날 상세 + 안내).
+  // - 시작일만 있는 상태 → 시작일을 다시 탭하면 선택 해제, 다른 날짜를
+  //   탭하면 종료일이 되어 구간이 완성된다 (종료일이 시작일보다 먼저면
+  //   자동으로 순서를 바꾼다). 구간 완성 시에는 둘러보기 이동을 하지
+  //   않는다 — 시작 날짜의 상세와 기간 합계 패널이 함께 남는다.
+  function onCalendarDateTap(ds) {
+    if (!ds) return;
+    if (calRange.start && !calRange.end) {
+      if (ds === calRange.start) {
+        calRange = { start: null, end: null };
+        renderCalendar();
+        return;
+      }
+      if (ds < calRange.start) {
+        calRange.end = calRange.start;
+        calRange.start = ds;
+      } else {
+        calRange.end = ds;
+      }
+      renderCalendar();
+      return;
+    }
+    calRange = { start: ds, end: null };
+    selectCalendarDate(ds);
+    renderCalendar();
+  }
+
+  function clearCalRange() {
+    calRange = { start: null, end: null };
+    renderCalendar();
+  }
+
+  // 구간 합계 (v15): tiptalk_history_v1 기준으로 시작일~종료일(양끝 포함)을
+  // 센트 단위로 합산한다. 기록 없는 날짜는 0으로 친다. 직원별 목록은 명단
+  // 전원을 포함한다 (그 기간에 받은 게 없는 사람도 0으로 표시).
+  function computeRangeTotals(startStr, endStr) {
+    var hist = loadHistory();
+    var perPerson = {};
+    var daysWith = 0;
+    var totalDays = 0;
+    var d = parseDateStr(startStr);
+    var end = parseDateStr(endStr);
+    while (d && end && d.getTime() <= end.getTime()) {
+      totalDays++;
+      var entry = hist[fmtDateStr(d)];
+      if (entry && Object.keys(entry).length > 0) {
+        daysWith++;
+        Object.keys(entry).forEach(function (name) {
+          perPerson[name] = (perPerson[name] || 0) + Math.round(entry[name] * 100);
+        });
+      }
+      d = addDays(d, 1);
+    }
+    state.roster.forEach(function (p) {
+      if (perPerson[p.name] == null) perPerson[p.name] = 0;
+    });
+    var names = sortedNames(perPerson);
+    var grand = names.reduce(function (a, n) { return a + perPerson[n]; }, 0);
+    return {
+      perPerson: perPerson, names: names, grandCents: grand,
+      daysWith: daysWith, totalDays: totalDays,
+    };
+  }
+
+  // 기간 합계 패널 (v15): 구간이 완성됐을 때만 달력 아래에 나타난다.
+  function renderRangePanel() {
+    var box = $('#rangePanel');
+    if (!box) return;
+    if (!(calRange.start && calRange.end)) {
+      box.innerHTML = '';
+      window.__tiptalkRange = null;
+      return;
+    }
+    var s = parseDateStr(calRange.start);
+    var e = parseDateStr(calRange.end);
+    var t = computeRangeTotals(calRange.start, calRange.end);
+    // 테스트·디버깅용으로 마지막 기간 합계를 노출한다 (지급 내역과 같은 방식).
+    window.__tiptalkRange = {
+      start: calRange.start, end: calRange.end,
+      perPerson: Object.assign({}, t.perPerson),
+      grandCents: t.grandCents, daysWith: t.daysWith, totalDays: t.totalDays,
+    };
+    var html = '<p class="detail-title">기간 합계</p>' +
+      '<p class="range-period">' + dayLabel(s) + ' (' + DOW_LABELS[s.getDay()] + '요일) ~ ' +
+      dayLabel(e) + ' (' + DOW_LABELS[e.getDay()] + '요일) · 총 ' + t.totalDays + '일</p>';
+    t.names.forEach(function (name) {
+      html += '<div class="detail-row"><span class="detail-name">' + esc(name) + '</span>' +
+        '<span class="detail-amt">' + fmt(t.perPerson[name]) + '</span></div>';
+    });
+    html += '<div class="detail-row detail-total"><span class="detail-name">전체 합계</span>' +
+      '<span class="detail-amt">' + fmt(t.grandCents) + '</span></div>';
+    html += '<p class="range-meta">기록이 있는 날 ' + t.daysWith + '일 · 전체 ' +
+      t.totalDays + '일</p>';
+    html += '<div class="range-clear-row">' +
+      '<button type="button" class="btn btn-ghost" data-range-clear>선택 지우기</button></div>';
+    box.innerHTML = html;
+    var btn = $('[data-range-clear]', box);
+    if (btn) btn.addEventListener('click', clearCalRange);
   }
 
   // 달력에서 날짜를 고르면: 날짜가 바뀌면 입력은 비워지고(안전장치),
@@ -1621,6 +1750,7 @@
       DOW_LABELS[sel.getDay()] + '요일)</p>';
     if (!entry || Object.keys(entry).length === 0) {
       box.innerHTML = title + '<p class="result-empty">기록이 없어요.</p>';
+      appendRangeHint(box);
       return;
     }
     var html = title;
@@ -1631,6 +1761,18 @@
     html += '<div class="detail-row detail-total"><span class="detail-name">합계</span>' +
       '<span class="detail-amt">' + fmt(dayTotalCents(entry)) + '</span></div>';
     box.innerHTML = html;
+    appendRangeHint(box);
+  }
+
+  // 단일 선택(시작일만 고른 상태)에서는 그날 상세 아래에 기간 합계로
+  // 이어지는 안내와 선택 지우기를 붙인다 (v15).
+  function appendRangeHint(box) {
+    if (!(calRange.start && !calRange.end)) return;
+    box.innerHTML += '<p class="range-hint">종료 날짜를 누르면 기간 합계를 볼 수 있어요</p>' +
+      '<div class="range-clear-row">' +
+      '<button type="button" class="btn btn-ghost" data-range-clear>선택 지우기</button></div>';
+    var btn = $('[data-range-clear]', box);
+    if (btn) btn.addEventListener('click', clearCalRange);
   }
 
   function moveCalMonth(delta) {
@@ -1643,14 +1785,22 @@
   }
 
   // ---------- 팁 지급 (v7): 선택 날짜부터 2주(14일) ----------
+  // v15: 달력 구간이 완성돼 있으면 그 구간(양끝 포함)이 지급 기간이 되고,
+  // 없으면 기존 동작(선택 날짜부터 2주)을 그대로 쓴다. CSV·텍스트 형식은
+  // 두 경우 모두 동일하다.
   var currentPayout = null; // {startStr, endStr, csv, text, hasData}
   function computePayout() {
-    var sel = parseDateStr(state.date) || new Date();
+    var useRange = !!(calRange.start && calRange.end);
+    var startD = useRange ? parseDateStr(calRange.start)
+      : (parseDateStr(state.date) || new Date());
+    var endD = useRange ? parseDateStr(calRange.end) : addDays(startD, 13);
     var hist = loadHistory();
     var days = [];
     var perPerson = {};
-    for (var i = 0; i < 14; i++) {
-      var d = addDays(sel, i);
+    var totalDays = 0;
+    var d = startD;
+    while (d && endD && d.getTime() <= endD.getTime()) {
+      totalDays++;
       var ds = fmtDateStr(d);
       var entry = hist[ds];
       if (entry && Object.keys(entry).length > 0) {
@@ -1661,6 +1811,7 @@
         });
         days.push({ date: d, dateStr: ds, rows: rows, totalCents: dayTotalCents(entry) });
       }
+      d = addDays(d, 1);
     }
     var names = Object.keys(perPerson);
     names.sort(function (a, b) {
@@ -1673,9 +1824,10 @@
     });
     var grand = names.reduce(function (a, n) { return a + perPerson[n]; }, 0);
     return {
-      start: sel, end: addDays(sel, 13),
-      startStr: fmtDateStr(sel), endStr: fmtDateStr(addDays(sel, 13)),
+      start: startD, end: endD,
+      startStr: fmtDateStr(startD), endStr: fmtDateStr(endD),
       days: days, names: names, perPerson: perPerson, grandCents: grand,
+      isRange: useRange, totalDays: totalDays,
     };
   }
   function csvCell(s) {
@@ -1723,7 +1875,8 @@
     var html = '<h3>팁 지급 내역</h3>' +
       '<p class="payout-period">' + p.start.getFullYear() + '년 ' + dayLabel(p.start) +
       ' (' + DOW_LABELS[p.start.getDay()] + ') ~ ' + dayLabel(p.end) +
-      ' (' + DOW_LABELS[p.end.getDay()] + ') · 2주</p>';
+      ' (' + DOW_LABELS[p.end.getDay()] + ') · ' +
+      (p.isRange ? '총 ' + p.totalDays + '일' : '2주') + '</p>';
     if (p.days.length === 0) {
       html += '<p class="result-empty">이 기간에는 기록이 없어요.</p>';
     } else {
