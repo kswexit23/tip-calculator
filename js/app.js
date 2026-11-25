@@ -23,6 +23,13 @@
  *     있으면 그 날짜의 히스토리 기록을 새 규칙 결과로 덮어써서, 달력·팁 지급
  *     합계에 옛 숫자가 남지 않게 한다 (migrateHistoryOnLoad). 입력이 없는
  *     날짜는 건드리지 않는다.
+ * v14: 오늘 정산 "직접 수정" — 자동 계산이 실제 지급과 다를 때를 대비해,
+ *     오늘 정산 표의 인당 오전/오후 금액을 직접 고치고 [저장]으로 확정할 수
+ *     있다. 수정값은 날짜별로 localStorage('tiptalk_overrides_v1')에 저장되고
+ *     그 날짜의 히스토리도 수정 분배로 갱신된다. 팁 총액과 차이가 나도 저장은
+ *     되지만 배너에 차이를 정직하게 표시한다. 그 날짜의 입력(총액·선택·
+ *     선지급)이 바뀌면 수정은 해제되고 계산값으로 돌아가며, v13 로드
+ *     마이그레이션도 수정된 날짜는 절대 덮어쓰지 않는다.
  * v12: 완료 버튼 위 안내 — 총액이 없어서 완료 버튼이 비활성인 경우 버튼 바로
  *     위에 "팁 총액을 입력하면 완료할 수 있어요"를 표시한다. 총액 미입력
  *     상태에서는 "선지급 합계 >= 총액" 경고를 표시에서 빼 안내와 겹치지
@@ -224,6 +231,73 @@
   // 보러 온 경우에는 false라서 기존 기록을 지우거나 덮지 않는다.
   var inputsDirty = false;
 
+  // ---------- 직접 수정 (v14) ----------
+  // 자동 계산이 실제 지급과 다를 때, 오늘 정산 표의 금액을 직접 고친 값.
+  // 구조: { "YYYY-MM-DD": { am: {personId: cents}, pm: {personId: cents},
+  //                          tipTotalCents: 저장 시점의 그날 팁 총액 } }
+  // tipTotalCents는 입력이 비워진 상태(둘러보기)에서도 배너의 차이 비교
+  // 기준으로 쓰기 위해 함께 저장한다.
+  var LS_OVERRIDE_KEY = 'tiptalk_overrides_v1';
+  function loadOverrides() {
+    try {
+      var raw = localStorage.getItem(LS_OVERRIDE_KEY);
+      if (!raw) return {};
+      var o = JSON.parse(raw);
+      return o && typeof o === 'object' && !Array.isArray(o) ? o : {};
+    } catch (e) { return {}; }
+  }
+  function saveOverrides(o) {
+    try { localStorage.setItem(LS_OVERRIDE_KEY, JSON.stringify(o)); } catch (e) { /* 무시 */ }
+  }
+  function overrideFor(date) {
+    if (!date) return null;
+    var o = loadOverrides()[date];
+    return o && typeof o === 'object' && !Array.isArray(o) ? o : null;
+  }
+  function setOverride(date, ov) {
+    if (!date) return;
+    var all = loadOverrides();
+    if (ov) all[date] = ov;
+    else delete all[date];
+    saveOverrides(all);
+  }
+  // override 분배를 히스토리 항목(이름 → 달러)으로 만든다. buildDayEntry와
+  // 같은 규칙: 오전+오후 합산, 1센트라도 받은 사람만, 명단에 없는 id는 제외.
+  function buildOverrideEntry(ov) {
+    var byId = {};
+    ['am', 'pm'].forEach(function (k) {
+      var m = ov[k] || {};
+      Object.keys(m).forEach(function (id) {
+        byId[id] = (byId[id] || 0) + (Math.round(m[id]) || 0);
+      });
+    });
+    var entry = {};
+    Object.keys(byId).forEach(function (id) {
+      var p = personById(id);
+      if (p && byId[id] > 0) entry[p.name] = Math.round(byId[id]) / 100;
+    });
+    return Object.keys(entry).length > 0 ? entry : null;
+  }
+  function overrideGrandCents(ov) {
+    var sum = 0;
+    ['am', 'pm'].forEach(function (k) {
+      var m = (ov && ov[k]) || {};
+      Object.keys(m).forEach(function (id) { sum += Math.round(m[id]) || 0; });
+    });
+    return sum;
+  }
+  // 오늘 정산 직접 수정 편집 세션 (저장하지 않는 화면 전용 상태).
+  // { values: { am: {personId: 입력 문자열}, pm: {...} }, revert: bool }
+  // revert=true는 "자동 계산으로 되돌리기"를 누른 상태 — 저장하면 override가
+  // 지워지고 계산값으로 복귀한다.
+  var resultEdit = null;
+  // 그 날짜의 입력이 바뀌면 수동 수정은 낡은 값이 되므로 해제한다.
+  // 편집 세션 중이었다면 기준이 바뀌었으니 세션도 함께 종료한다.
+  function clearCurrentOverride() {
+    if (overrideFor(state.date)) setOverride(state.date, null);
+    if (resultEdit) resultEdit = null;
+  }
+
   // 현재 입력이 만들어낼 날짜 기록을 syncHistory와 같은 규칙으로 만든다.
   // 저장될 기록이 없는 상태(총액 0·합계 검증 실패·받은 사람이 없음)면 null.
   // v11 날짜 이동의 덮어쓰기 판정도 이 함수를 써서 "실제로 저장될 기록"과
@@ -240,17 +314,27 @@
     return Object.keys(entry).length > 0 ? entry : null;
   }
 
-  // 계산 결과를 현재 선택 날짜의 기록으로 반영한다.
+  // 현재 선택 날짜의 기록을 "지금 확정된 분배"로 맞춘다. 실제로 바뀌었으면
+  // true를 돌려준다.
+  // - 직접 수정(v14)이 있는 날짜는 수정 분배가 기준이다 (계산값으로 덮지 않음).
   // - 총액 0 → 그 날짜 기록 삭제 (사용자가 입력을 비운 경우)
   // - 합계 검증 OK → 인당 합계로 저장 (이름 기준, 주방 포함 전 인원)
   // - 선지급 검증 오류 등 미완성 상태 → 기존 기록을 건드리지 않는다
-  function syncHistory(day) {
-    if (!inputsDirty) return;
+  function writeHistoryForCurrentDate(day) {
     var date = state.date;
-    if (!date) return;
+    if (!date) return false;
     var hist = loadHistory();
     var changed = false;
-    if (day.totalCents === 0) {
+    var ov = overrideFor(date);
+    if (ov) {
+      var oEntry = buildOverrideEntry(ov);
+      if (!oEntry) {
+        if (hist[date]) { delete hist[date]; changed = true; }
+      } else if (JSON.stringify(hist[date]) !== JSON.stringify(oEntry)) {
+        hist[date] = oEntry;
+        changed = true;
+      }
+    } else if (day.totalCents === 0) {
       if (hist[date]) { delete hist[date]; changed = true; }
     } else if (day.balanced) {
       var entry = buildDayEntry(day);
@@ -261,10 +345,14 @@
         changed = true;
       }
     }
-    if (changed) {
-      saveHistory(hist);
-      renderCalendar();
-    }
+    if (changed) saveHistory(hist);
+    return changed;
+  }
+
+  // 계산 결과를 현재 선택 날짜의 기록으로 반영한다 (입력을 건드린 경우만).
+  function syncHistory(day) {
+    if (!inputsDirty) return;
+    if (writeHistoryForCurrentDate(day)) renderCalendar();
   }
 
   // ---------- v13 소급 적용: 로드 시 히스토리 재계산 마이그레이션 ----------
@@ -281,6 +369,9 @@
   // 건드리면 기존 syncHistory가 같은 방식으로 계속 맞춰 준다.
   function migrateHistoryOnLoad() {
     if (!state.date) return;
+    // v14: 직접 수정한 날짜는 사용자가 확정한 분배가 정본이다 — 재계산으로
+    // 절대 덮어쓰지 않는다.
+    if (overrideFor(state.date)) return;
     var day = currentDayResult();
     if (day.totalCents === 0 || !day.balanced) return;
     var entry = buildDayEntry(day);
@@ -362,6 +453,18 @@
       delete hist[state.date];
       saveHistory(hist);
     }
+    // v14: 직접 수정도 입력과 함께 새 날짜로 따라간다 (옛 날짜 것 삭제,
+    // 새 날짜에 있던 수정은 지금 입력의 수정으로 교체).
+    var ovs = loadOverrides();
+    if (ovs[state.date]) {
+      ovs[newDate] = ovs[state.date];
+      delete ovs[state.date];
+      saveOverrides(ovs);
+    } else if (ovs[newDate]) {
+      delete ovs[newDate];
+      saveOverrides(ovs);
+    }
+    resultEdit = null;
     state.date = newDate;
     var di = $('#dateInput');
     if (di) di.value = newDate;
@@ -376,6 +479,7 @@
   function navigateDate(newDate) {
     state.date = newDate;
     clearShiftInputs();
+    resultEdit = null; // 날짜가 바뀌면 편집 세션은 끝난다 (그 날짜 수정값 자체는 유지)
     inputsDirty = false;
     calYearMonth = null;
     hideDateMoveConfirm();
@@ -511,6 +615,8 @@
       calYearMonth = null;
       hideDateMoveConfirm();
     }
+    // v14: 사진으로 입력이 채워지면 그 날짜의 직접 수정은 낡은 값이 된다.
+    clearCurrentOverride();
     inputsDirty = true;
     var targetKey = TipPhoto.decideShift(row.settled_time) || fromKey;
     var shift = state.shifts[targetKey];
@@ -706,6 +812,7 @@
     shift.photoRef = null;
     TipPhoto.cancelRow(ref.id);
     TipPhoto.deletePhotoFile(ref.path);
+    clearCurrentOverride(); // v14: 사진이 채운 값이 되돌아가면 직접 수정도 해제
     inputsDirty = true; // 총액이 비워졌으면 그날 기록도 다시 맞춘다
     ui.msg = '사진을 지웠어요. 다시 올릴 수 있어요.';
     save();
@@ -966,6 +1073,7 @@
     totalInput.addEventListener('input', function () {
       shift.total = totalInput.value;
       inputsDirty = true;
+      clearCurrentOverride(); // v14: 입력이 바뀌면 직접 수정은 해제
       save();
       updateShiftWarnings(key, section);
       renderResults();
@@ -975,6 +1083,7 @@
       btn.addEventListener('click', function () {
         var id = btn.getAttribute('data-chip');
         inputsDirty = true;
+        clearCurrentOverride();
         if (shift.selected[id]) delete shift.selected[id];
         else shift.selected[id] = {};
         // 사진 판독 제안은 탭하는 순간 확정/해제되므로 제안 표시를 지운다.
@@ -1018,6 +1127,7 @@
         if (!row) return;
         row.personId = sel.value;
         inputsDirty = true;
+        clearCurrentOverride();
         save();
         renderShift(key);
         renderResults();
@@ -1029,6 +1139,7 @@
         if (!row) return;
         row.amount = inp.value;
         inputsDirty = true;
+        clearCurrentOverride();
         save();
         updateShiftWarnings(key, section);
         renderResults();
@@ -1038,6 +1149,7 @@
       btn.addEventListener('click', function () {
         shift.prepays.splice(+btn.getAttribute('data-prepay-del'), 1);
         inputsDirty = true;
+        clearCurrentOverride();
         save();
         renderShift(key);
         renderResults();
@@ -1064,6 +1176,7 @@
         if (!Array.isArray(shift.prepays)) shift.prepays = [];
         shift.prepays.push({ personId: first.id, amount: '' });
         inputsDirty = true;
+        clearCurrentOverride();
         save();
         renderShift(key);
         renderResults();
@@ -1085,22 +1198,43 @@
   }
 
   // ---------- 결과 렌더 ----------
+  // 결과 표에 표시할 사람들 (명단 순서). 직접 수정이 있으면 그 날짜에
+  // 수정값이 있는 사람도 포함한다.
+  function resultRows(day, ov) {
+    return state.roster.filter(function (p) {
+      if (ov && ((ov.am && ov.am[p.id] != null) || (ov.pm && ov.pm[p.id] != null))) {
+        return true;
+      }
+      return day.perPerson[p.id] != null ||
+        state.shifts.am.selected[p.id] || state.shifts.pm.selected[p.id];
+    });
+  }
+
   function renderResults() {
     var body = $('#resultBody');
     var amRes = computeForShift(state.shifts.am).result;
     var pmRes = computeForShift(state.shifts.pm).result;
     var day = TipCalc.computeDay([amRes, pmRes]);
     syncHistory(day);
+    var ov = overrideFor(state.date);
+
+    // v14: 직접 수정 편집 중이면 편집 표를 그린다 (초안 값 기준).
+    if (resultEdit) {
+      renderResultEditor(body, day, ov, amRes, pmRes);
+      return;
+    }
+    // v14: 직접 수정이 저장된 날짜는 수정 분배가 정본이다.
+    if (ov) {
+      renderOverrideResults(body, day, ov);
+      return;
+    }
 
     if (day.totalCents === 0) {
       body.innerHTML = '<p class="result-empty">위에서 팁 총액을 입력하면 여기에 사람별 정산이 나와요.</p>';
       return;
     }
 
-    var rows = state.roster.filter(function (p) {
-      return day.perPerson[p.id] != null ||
-        state.shifts.am.selected[p.id] || state.shifts.pm.selected[p.id];
-    });
+    var rows = resultRows(day, null);
     var html = '<table class="result"><thead><tr>' +
       '<th>이름</th><th class="col-am">오전</th><th class="col-pm">오후</th><th>합계</th></tr></thead><tbody>';
     rows.forEach(function (p) {
@@ -1132,7 +1266,252 @@
         return '<div class="warning">⚠ ' + esc(w) + '</div>';
       }).join('') + '</div>';
     }
+    html += '<div class="result-actions">' +
+      '<button type="button" class="btn" data-result-edit>✎ 직접 수정</button></div>';
     body.innerHTML = html;
+    attachResultEditStart(body, day, null, amRes, pmRes);
+  }
+
+  // 직접 수정된 분배의 표시 (v14). 합계 배너는 팁 총액과의 차이를 정직하게
+  // 보여준다 — 차이가 있는데 "합계가 맞아요"라고 하지 않는다.
+  function renderOverrideResults(body, day, ov) {
+    var rows = resultRows(day, ov);
+    var amSum = 0;
+    var pmSum = 0;
+    var html = '<p class="manual-note">✎ 직접 수정한 정산이에요</p>';
+    html += '<table class="result"><thead><tr>' +
+      '<th>이름</th><th class="col-am">오전</th><th class="col-pm">오후</th><th>합계</th></tr></thead><tbody>';
+    rows.forEach(function (p) {
+      var amVal = ov.am && ov.am[p.id] != null ? Math.round(ov.am[p.id]) : null;
+      var pmVal = ov.pm && ov.pm[p.id] != null ? Math.round(ov.pm[p.id]) : null;
+      if (amVal != null) amSum += amVal;
+      if (pmVal != null) pmSum += pmVal;
+      html += '<tr><td class="p-name">' + esc(p.name) +
+        (p.role === 'kitchen' ? ' <span class="role-badge kitchen">주방</span>' : '') + '</td>' +
+        '<td class="col-am">' + fmt(amVal) + '</td>' +
+        '<td class="col-pm">' + fmt(pmVal) + '</td>' +
+        '<td class="p-total">' + fmt((amVal || 0) + (pmVal || 0)) + '</td></tr>';
+    });
+    var grand = amSum + pmSum;
+    html += '</tbody><tfoot><tr><td>전체</td><td class="col-am">' + fmt(amSum) + '</td><td class="col-pm">' +
+      fmt(pmSum) + '</td><td>' + fmt(grand) + '</td></tr></tfoot></table>';
+
+    // 차이 비교 기준: 지금 입력된 팁 총액, 입력이 없으면 저장 시점의 총액.
+    var refTotal = day.totalCents > 0 ? day.totalCents : (ov.tipTotalCents || 0);
+    if (refTotal > 0) {
+      var diff = grand - refTotal;
+      if (diff === 0) {
+        html += '<div class="verify ok">✓ 합계가 맞아요 — 총 ' + fmt(refTotal) +
+          '가 빠짐없이 나뉘었어요.</div>';
+      } else {
+        html += '<div class="verify bad">⚠ 직접 수정한 합계는 총 ' + fmt(grand) +
+          '예요 — 팁 총액 ' + fmt(refTotal) + '보다 ' + fmt(Math.abs(diff)) +
+          (diff > 0 ? ' 많아요.' : ' 적어요.') + '</div>';
+      }
+    }
+    html += '<div class="result-actions">' +
+      '<button type="button" class="btn" data-result-edit>✎ 직접 수정</button></div>';
+    body.innerHTML = html;
+    attachResultEditStart(body, day, ov, null, null);
+  }
+
+  // 편집 시작 버튼 연결 + 편집 세션 씨드 값 만들기.
+  function attachResultEditStart(body, day, ov, amRes, pmRes) {
+    var btn = $('[data-result-edit]', body);
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+      var aRes = amRes || computeForShift(state.shifts.am).result;
+      var pRes = pmRes || computeForShift(state.shifts.pm).result;
+      var d = TipCalc.computeDay([aRes, pRes]);
+      var curOv = overrideFor(state.date);
+      var values = { am: {}, pm: {} };
+      resultRows(d, curOv).forEach(function (p) {
+        values.am[p.id] = editSeedValue('am', p.id, aRes, curOv);
+        values.pm[p.id] = editSeedValue('pm', p.id, pRes, curOv);
+      });
+      resultEdit = { values: values, revert: false };
+      renderResults();
+    });
+  }
+  // 편집 칸의 시작 값: 저장된 수정값이 있으면 그 값, 없으면 자동 계산값.
+  // 몫이 없는 셀(그 시프트에 총액이 없거나 배분이 없는 사람)은 빈 칸.
+  function editSeedValue(key, id, shiftRes, ov) {
+    if (ov && ov[key] && ov[key][id] != null) {
+      return (Math.round(ov[key][id]) / 100).toFixed(2);
+    }
+    if (!ov && shiftRes && shiftRes.totalCents > 0 && shiftRes.perPerson[id] != null) {
+      return (shiftRes.perPerson[id] / 100).toFixed(2);
+    }
+    return '';
+  }
+
+  // 직접 수정 편집 표 (v14). 입력할 때마다 행 합계·전체 합계·팁 총액과의
+  // 차이를 그 자리에서 다시 계산해 보여준다 (전체 다시 그리기는 하지 않아
+  // 입력 포커스가 유지된다).
+  function renderResultEditor(body, day, ov, amRes, pmRes) {
+    var rows = resultRows(day, ov);
+    var html = '<p class="edit-note">금액을 직접 고칠 수 있어요. ' +
+      '빈 칸은 그 시프트 몫이 없는 거예요.</p>';
+    html += '<table class="result edit-table"><thead><tr>' +
+      '<th>이름</th><th class="col-am">오전</th><th class="col-pm">오후</th><th>합계</th></tr></thead><tbody>';
+    rows.forEach(function (p) {
+      html += '<tr><td class="p-name">' + esc(p.name) +
+        (p.role === 'kitchen' ? ' <span class="role-badge kitchen">주방</span>' : '') + '</td>' +
+        '<td class="col-am"><input type="number" class="edit-input" inputmode="decimal" ' +
+          'min="0" step="0.01" placeholder="–" data-edit-input data-person="' + p.id +
+          '" data-shift="am" value="' + esc(resultEdit.values.am[p.id] || '') + '"></td>' +
+        '<td class="col-pm"><input type="number" class="edit-input" inputmode="decimal" ' +
+          'min="0" step="0.01" placeholder="–" data-edit-input data-person="' + p.id +
+          '" data-shift="pm" value="' + esc(resultEdit.values.pm[p.id] || '') + '"></td>' +
+        '<td class="p-total" data-edit-rowtotal="' + p.id + '"></td></tr>';
+    });
+    html += '</tbody><tfoot><tr><td>전체</td>' +
+      '<td class="col-am" data-edit-total="am"></td>' +
+      '<td class="col-pm" data-edit-total="pm"></td>' +
+      '<td data-edit-total="day"></td></tr></tfoot></table>';
+    html += '<div class="edit-diff" data-edit-diff></div>';
+    html += '<div class="edit-actions">' +
+      '<button type="button" class="btn btn-primary" data-edit-save>저장</button>' +
+      '<button type="button" class="btn" data-edit-cancel>취소</button>' +
+      (day.totalCents > 0
+        ? '<button type="button" class="btn" data-edit-revert>자동 계산으로 되돌리기</button>'
+        : '') +
+      '</div>';
+    body.innerHTML = html;
+
+    body.querySelectorAll('[data-edit-input]').forEach(function (inp) {
+      inp.addEventListener('input', function () {
+        var k = inp.getAttribute('data-shift');
+        var id = inp.getAttribute('data-person');
+        resultEdit.values[k][id] = inp.value;
+        resultEdit.revert = false; // 손으로 값을 바꾸면 되돌리기 예약은 풀린다
+        updateEditTotals(body, day, ov);
+      });
+    });
+    var saveBtn = $('[data-edit-save]', body);
+    if (saveBtn) {
+      saveBtn.addEventListener('click', function () { saveResultEdit(day, ov); });
+    }
+    var cancelBtn = $('[data-edit-cancel]', body);
+    if (cancelBtn) {
+      cancelBtn.addEventListener('click', function () {
+        resultEdit = null;
+        renderResults();
+      });
+    }
+    var revertBtn = $('[data-edit-revert]', body);
+    if (revertBtn) {
+      revertBtn.addEventListener('click', function () {
+        // 입력 칸을 자동 계산값으로 다시 채우고, 저장하면 수정이 해제된다.
+        resultRows(day, ov).forEach(function (p) {
+          resultEdit.values.am[p.id] = editSeedValue('am', p.id, amRes, null);
+          resultEdit.values.pm[p.id] = editSeedValue('pm', p.id, pmRes, null);
+        });
+        resultEdit.revert = true;
+        renderResults();
+      });
+    }
+    updateEditTotals(body, day, ov);
+  }
+
+  // 편집 중 합계·차이 표시 갱신 (입력 칸은 건드리지 않는다).
+  function updateEditTotals(body, day, ov) {
+    if (!resultEdit) return;
+    var sums = { am: 0, pm: 0 };
+    Object.keys(resultEdit.values.am).forEach(function (id) {
+      var c = editDraftCents(resultEdit.values.am[id]);
+      sums.am += c;
+      var cell = body.querySelector('[data-edit-rowtotal="' + id + '"]');
+      if (cell) {
+        cell.textContent = fmt(c + editDraftCents(resultEdit.values.pm[id]));
+      }
+    });
+    Object.keys(resultEdit.values.pm).forEach(function (id) {
+      sums.pm += editDraftCents(resultEdit.values.pm[id]);
+    });
+    var amCell = body.querySelector('[data-edit-total="am"]');
+    var pmCell = body.querySelector('[data-edit-total="pm"]');
+    var dayCell = body.querySelector('[data-edit-total="day"]');
+    if (amCell) amCell.textContent = fmt(sums.am);
+    if (pmCell) pmCell.textContent = fmt(sums.pm);
+    if (dayCell) dayCell.textContent = fmt(sums.am + sums.pm);
+    var diffBox = body.querySelector('[data-edit-diff]');
+    if (diffBox) {
+      var refTotal = day.totalCents > 0 ? day.totalCents : (ov ? (ov.tipTotalCents || 0) : 0);
+      var grand = sums.am + sums.pm;
+      if (refTotal <= 0) {
+        diffBox.textContent = '';
+        diffBox.className = 'edit-diff';
+      } else if (grand === refTotal) {
+        diffBox.textContent = '팁 총액 ' + fmt(refTotal) + '와 딱 맞아요.';
+        diffBox.className = 'edit-diff ok';
+      } else {
+        var diff = grand - refTotal;
+        diffBox.textContent = '팁 총액 ' + fmt(refTotal) + '보다 ' +
+          fmt(Math.abs(diff)) + (diff > 0 ? ' 많아요.' : ' 적어요.');
+        diffBox.className = 'edit-diff bad';
+      }
+    }
+  }
+  // 편집 칸 문자열 → 센트. 빈 칸·잘못된 값·음수는 0으로 본다 (합계 표시용).
+  function editDraftCents(raw) {
+    var s = String(raw == null ? '' : raw).trim();
+    if (s === '') return 0;
+    var c = TipCalc.toCents(s);
+    return isFinite(c) && c > 0 ? c : 0;
+  }
+
+  // 직접 수정 저장 (v14).
+  // - 되돌리기 상태면 수정을 지우고 계산값으로 복귀한다.
+  // - 자동 계산값과 완전히 같아진 수정도 굳이 남기지 않는다.
+  // - 그 외에는 날짜별 수정값으로 저장하고, 그 날짜 히스토리도 수정 분배로
+  //   맞춘다 (달력·주급 정산이 수정값을 쓰도록).
+  function saveResultEdit(day, ov) {
+    if (!resultEdit) return;
+    if (resultEdit.revert) {
+      setOverride(state.date, null);
+      resultEdit = null;
+      writeHistoryForCurrentDate(day);
+      renderResults();
+      renderCalendar();
+      return;
+    }
+    var data = { am: {}, pm: {} };
+    ['am', 'pm'].forEach(function (k) {
+      Object.keys(resultEdit.values[k]).forEach(function (id) {
+        var raw = String(resultEdit.values[k][id] == null ? '' : resultEdit.values[k][id]).trim();
+        if (raw === '') return; // 빈 칸 = 그 시프트 몫 없음
+        var c = TipCalc.toCents(raw);
+        if (!isFinite(c) || c < 0) c = 0;
+        data[k][id] = c;
+      });
+    });
+    if (day.totalCents > 0 && overrideEqualsComputed(data, day)) {
+      setOverride(state.date, null);
+    } else {
+      data.tipTotalCents = day.totalCents > 0
+        ? day.totalCents : (ov ? (ov.tipTotalCents || 0) : 0);
+      setOverride(state.date, data);
+    }
+    resultEdit = null;
+    writeHistoryForCurrentDate(day);
+    renderResults();
+    renderCalendar();
+  }
+  // 수정값이 자동 계산값과 같은지 (0인 항목은 없는 것으로 취급해 비교).
+  function overrideEqualsComputed(data, day) {
+    var aRes = computeForShift(state.shifts.am).result;
+    var pRes = computeForShift(state.shifts.pm).result;
+    function norm(m, shiftRes) {
+      var out = {};
+      if (shiftRes.totalCents === 0) return out;
+      Object.keys(m || {}).forEach(function (id) {
+        if (m[id]) out[id] = Math.round(m[id]);
+      });
+      return out;
+    }
+    return JSON.stringify(norm(data.am, aRes)) === JSON.stringify(norm(aRes.perPerson, aRes)) &&
+      JSON.stringify(norm(data.pm, pRes)) === JSON.stringify(norm(pRes.perPerson, pRes));
   }
 
   // ---------- 날짜별 기록 달력 (v7: 주급 정산표 대체) ----------
@@ -1225,6 +1604,7 @@
     var di = $('#dateInput');
     if (di) di.value = ds;
     clearShiftInputs();
+    resultEdit = null;
     inputsDirty = false;
     calYearMonth = null;
     hideDateMoveConfirm();
@@ -1395,6 +1775,7 @@
       if (p) {
         p.role = p.role === 'kitchen' ? 'server' : 'kitchen';
         inputsDirty = true; // 역할이 바뀌면 계산 결과가 달라지므로 기록도 갱신
+        clearCurrentOverride(); // v14: 계산 기준이 바뀌면 직접 수정도 해제
         save();
         renderAll();
       }
@@ -1402,6 +1783,7 @@
       var target = personById(delBtn.getAttribute('data-delete-person'));
       if (target && window.confirm(target.name + ' 님을 명단에서 지울까요?')) {
         inputsDirty = true;
+        clearCurrentOverride();
         state.roster = state.roster.filter(function (x) { return x.id !== target.id; });
         SHIFT_DEFS.forEach(function (d) {
           delete state.shifts[d.key].selected[target.id];
@@ -1510,6 +1892,8 @@
     dateInput.value = state.date;
     calYearMonth = null;
     hideDateMoveConfirm();
+    resultEdit = null;
+    setOverride(state.date, null); // v14: 오늘 직접 수정도 함께 지운다
     inputsDirty = true; // 오늘 기록도 함께 지워지게 (총액 0 → 기록 삭제)
     save();
     renderAll();
